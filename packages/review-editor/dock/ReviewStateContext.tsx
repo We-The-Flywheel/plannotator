@@ -78,6 +78,9 @@ export interface ReviewState {
 
   // Diff navigation
   openDiffFile: (filePath: string) => void;
+
+  // Tour
+  openTourPanel: (jobId: string) => void;
 }
 
 const ReviewStateContext = createContext<ReviewState | null>(null);

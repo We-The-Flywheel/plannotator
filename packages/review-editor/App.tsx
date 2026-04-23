@@ -61,6 +61,8 @@ import type { DiffFile } from './types';
 import type { DiffOption, WorktreeInfo, GitContext } from '@plannotator/shared/types';
 import type { PRMetadata } from '@plannotator/shared/pr-provider';
 import { altKey } from '@plannotator/ui/utils/platform';
+import { TourDialog } from './components/tour/TourDialog';
+import { DEMO_TOUR_ID } from './demoTour';
 
 declare const __APP_VERSION__: string;
 declare const __GIT_BRANCH__: string;
@@ -230,6 +232,9 @@ const ReviewApp: React.FC = () => {
   // so this should be addressed as a broader refactor.
   const { externalAnnotations, updateExternalAnnotation, deleteExternalAnnotation } = useExternalAnnotations<CodeAnnotation>({ enabled: !!origin });
   const agentJobs = useAgentJobs({ enabled: !!origin });
+
+  // Tour dialog state — opens as an overlay instead of a dock panel
+  const [tourDialogJobId, setTourDialogJobId] = useState<string | null>(null);
 
   // Dockview center panel API for the review workspace.
   const [dockApi, setDockApi] = useState<DockviewApi | null>(null);
@@ -553,6 +558,39 @@ const ReviewApp: React.FC = () => {
       params: { jobId },
     });
   }, [dockApi, agentJobs.jobs]);
+
+  // Open tour as a dialog overlay
+  const handleOpenTour = useCallback((jobId: string) => {
+    setTourDialogJobId(jobId);
+  }, []);
+
+  // Dev-only: Cmd/Ctrl+Shift+T toggles the demo tour for fast UI iteration.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
+        e.preventDefault();
+        setTourDialogJobId(prev => (prev === DEMO_TOUR_ID ? null : DEMO_TOUR_ID));
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  // Auto-open tour dialog when a tour job completes
+  const tourAutoOpenRef = useRef(new Set<string>());
+  useEffect(() => {
+    for (const job of agentJobs.jobs) {
+      if (
+        job.provider === 'tour' &&
+        job.status === 'done' &&
+        !tourAutoOpenRef.current.has(job.id)
+      ) {
+        tourAutoOpenRef.current.add(job.id);
+        setTourDialogJobId(job.id);
+      }
+    }
+  }, [agentJobs.jobs]);
 
   // Open PR panel as center dock panel
   const handleOpenPRPanel = useCallback((type: 'summary' | 'comments' | 'checks') => {
@@ -1028,6 +1066,7 @@ const ReviewApp: React.FC = () => {
     fetchPRContext,
     platformUser,
     openDiffFile,
+    openTourPanel: handleOpenTour,
   }), [
     files, activeFileIndex, diffStyle, diffOverflow, diffIndicators,
     diffLineDiffType, diffShowLineNumbers, diffShowBackground,
@@ -1042,6 +1081,7 @@ const ReviewApp: React.FC = () => {
     handleAskAI, handleViewAIResponse, handleClickAIMarker,
     aiHistoryForSelection, agentJobs.jobs, prMetadata, prContext,
     isPRContextLoading, prContextError, fetchPRContext, platformUser, openDiffFile,
+    handleOpenTour,
   ]);
 
   // Separate context for high-frequency job logs — prevents re-rendering all panels on every SSE event
@@ -2099,6 +2139,22 @@ const ReviewApp: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Tour dialog overlay */}
+      <TourDialog jobId={tourDialogJobId} onClose={() => setTourDialogJobId(null)} />
+
+      {/* Dev-only: open a fully-formed demo tour without running the agent.
+          Stripped from production builds via import.meta.env.DEV. */}
+      {import.meta.env.DEV && (
+        <button
+          onClick={() => setTourDialogJobId(tourDialogJobId === DEMO_TOUR_ID ? null : DEMO_TOUR_ID)}
+          title="Open the demo tour (dev only). Cmd+Shift+T also works."
+          className="fixed bottom-3 right-3 z-[60] px-2.5 py-1 rounded-md bg-foreground/80 text-background text-[10px] font-mono uppercase tracking-wider shadow-lg hover:bg-foreground transition-colors"
+        >
+          {tourDialogJobId === DEMO_TOUR_ID ? 'Close tour' : 'Demo tour'}
+        </button>
+      )}
+
     </JobLogsProvider>
     </ReviewStateProvider>
     </ThemeProvider>

@@ -190,7 +190,7 @@ export async function parseShareHash(): Promise<SharePayload | null> {
   }
 
   try {
-    return await decompress(hash);
+    return (await decompress(hash)) as SharePayload;
   } catch (e) {
     console.warn('Failed to parse share hash:', e);
     return null;

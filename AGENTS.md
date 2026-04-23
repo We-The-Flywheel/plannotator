@@ -243,12 +243,14 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/external-annotations` | POST | Add external annotations (single or batch `{ annotations: [...] }`) |
 | `/api/external-annotations` | PATCH | Update fields on a single annotation (`?id=`) |
 | `/api/external-annotations` | DELETE | Remove by `?id=`, `?source=`, or clear all |
-| `/api/agents/capabilities` | GET | Check available agent providers (claude, codex) |
+| `/api/agents/capabilities` | GET | Check available agent providers (claude, codex, tour) |
 | `/api/agents/jobs/stream` | GET | SSE stream for real-time agent job status updates |
 | `/api/agents/jobs` | GET | Snapshot of agent jobs (polling fallback, `?since=N` for version gating) |
 | `/api/agents/jobs` | POST | Launch an agent job (body: `{ provider, command, label }`) |
 | `/api/agents/jobs` | DELETE | Kill all running agent jobs |
 | `/api/agents/jobs/:id` | DELETE | Kill a specific agent job |
+| `/api/tour/:jobId` | GET | Fetch Code Tour result (greeting, stops, checklist) for a completed tour job |
+| `/api/tour/:jobId/checklist` | PUT | Persist checklist item state for a Code Tour |
 
 ### Annotate Server (`packages/server/annotate.ts`)
 
@@ -337,10 +339,11 @@ interface Annotation {
 
 interface Block {
   id: string;
-  type: "paragraph" | "heading" | "blockquote" | "list-item" | "code" | "hr";
+  type: "paragraph" | "heading" | "blockquote" | "list-item" | "code" | "hr" | "table" | "html" | "directive";
   content: string;
   level?: number; // For headings (1-6)
   language?: string; // For code blocks
+  alertKind?: "note" | "tip" | "warning" | "caution" | "important"; // GitHub alerts (blockquote subtype)
   order: number;
   startLine: number;
 }
@@ -352,12 +355,15 @@ interface Block {
 
 `parseMarkdownToBlocks(markdown)` splits markdown into Block objects. Handles:
 
-- Headings (`#`, `##`, etc.)
+- Headings (`#`, `##`, etc.) with slug-derived anchor ids
 - Code blocks (``` with language extraction)
 - List items (`-`, `*`, `1.`)
-- Blockquotes (`>`)
+- Blockquotes (`>`) — including GitHub alerts (`> [!NOTE|TIP|WARNING|CAUTION|IMPORTANT]`) which set `alertKind`
 - Horizontal rules (`---`)
-- Paragraphs (default)
+- Tables (pipe-delimited) — rendered via `TableBlock` with a `TableToolbar` (copy as markdown/CSV) and `TablePopout` overlay
+- Raw HTML blocks (`<details>`, `<summary>`, etc.) — rendered via `HtmlBlock` through `marked` + DOMPurify
+- Directive containers (`:::kind ... :::`) — rendered via `Callout`
+- Paragraphs (default) with inline extras: bare URL autolinks, `@mentions` / `#issue-refs`, emoji shortcodes, smart punctuation
 
 `exportAnnotations(blocks, annotations, globalAttachments)` generates human-readable feedback for Claude. Images are referenced by name: `[image-name] /tmp/path...`. Annotations with `diffContext` include `[In diff content]` labels.
 

@@ -19,8 +19,18 @@ export interface AgentJobInfo {
   id: string;
   /** Source identifier for external annotations — "agent-{id prefix}". */
   source: string;
-  /** Provider that spawned this job — "claude", "codex", "shell", etc. */
+  /** Provider that spawned this job — "claude", "codex", "tour", "shell", etc. */
   provider: string;
+  /** Underlying engine used (e.g., "claude" or "codex"). Set when provider is "tour". */
+  engine?: string;
+  /** Model used (e.g., "sonnet", "opus"). Set when provider is "tour" with Claude engine. */
+  model?: string;
+  /** Claude --effort level (e.g., "low", "medium", "high", "xhigh", "max"). */
+  effort?: string;
+  /** Codex reasoning effort level (e.g., "high", "medium"). */
+  reasoningEffort?: string;
+  /** Whether Codex fast mode (service_tier=fast) was enabled. */
+  fastMode?: boolean;
   /** Human-readable label for the job. */
   label: string;
   /** Current lifecycle status. */

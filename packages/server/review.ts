@@ -32,6 +32,7 @@ import {
   parseClaudeStreamOutput,
   transformClaudeFindings,
 } from "./claude-review";
+import { createTourSession, TOUR_EMPTY_OUTPUT_ERROR } from "./tour/tour-review";
 import { saveConfig, detectGitUser, getServerConfig } from "./config";
 import { type PRMetadata, type PRReviewFileComment, fetchPRFileContent, fetchPRContext, submitPRReview, fetchPRViewedFiles, markPRFilesViewed, getPRUser, prRefFromMetadata, getDisplayRepo, getMRLabel, getMRNumberLabel } from "./pr";
 import { createAIEndpoints, ProviderRegistry, SessionManager, createProvider, type AIEndpoints, type PiSDKConfig } from "@plannotator/ai";
@@ -123,6 +124,8 @@ export async function startReviewServer(
   const editorAnnotations = createEditorAnnotationHandler();
   const externalAnnotations = createExternalAnnotationHandler("review");
 
+  const tour = createTourSession();
+
   // Mutable state for diff switching
   let currentPatch = options.rawPatch;
   let currentGitRef = options.gitRef;
@@ -131,42 +134,54 @@ export async function startReviewServer(
 
   // Agent jobs — background process manager (late-binds serverUrl via getter)
   let serverUrl = "";
+  const resolveAgentCwd = (): string =>
+    options.agentCwd ?? resolveVcsCwd(currentDiffType, gitContext?.cwd) ?? process.cwd();
   const agentJobs = createAgentJobHandler({
     mode: "review",
     getServerUrl: () => serverUrl,
-    getCwd: () => {
-      if (options.agentCwd) return options.agentCwd;
-      return resolveVcsCwd(currentDiffType, gitContext?.cwd) ?? process.cwd();
-    },
+    getCwd: resolveAgentCwd,
 
-    async buildCommand(provider) {
-      const cwd = options.agentCwd ?? resolveVcsCwd(currentDiffType, gitContext?.cwd) ?? process.cwd();
+    async buildCommand(provider, config) {
+      const cwd = resolveAgentCwd();
       const hasAgentLocalAccess = !!options.agentCwd || !!gitContext;
-      const userMessage = buildCodexReviewUserMessage(
-        currentPatch,
-        currentDiffType,
-        { defaultBranch: gitContext?.defaultBranch, hasLocalAccess: hasAgentLocalAccess },
-        prMetadata,
-      );
+      const userMessageOptions = { defaultBranch: gitContext?.defaultBranch, hasLocalAccess: hasAgentLocalAccess };
+
+      if (provider === "tour") {
+        return tour.buildCommand({
+          cwd,
+          patch: currentPatch,
+          diffType: currentDiffType,
+          options: userMessageOptions,
+          prMetadata,
+          config,
+        });
+      }
+
+      const userMessage = buildCodexReviewUserMessage(currentPatch, currentDiffType, userMessageOptions, prMetadata);
 
       if (provider === "codex") {
+        const model = typeof config?.model === "string" && config.model ? config.model : undefined;
+        const reasoningEffort = typeof config?.reasoningEffort === "string" && config.reasoningEffort ? config.reasoningEffort : undefined;
+        const fastMode = config?.fastMode === true;
         const outputPath = generateOutputPath();
         const prompt = CODEX_REVIEW_SYSTEM_PROMPT + "\n\n---\n\n" + userMessage;
-        const command = await buildCodexCommand({ cwd, outputPath, prompt });
-        return { command, outputPath, prompt, label: "Codex Review" };
+        const command = await buildCodexCommand({ cwd, outputPath, prompt, model, reasoningEffort, fastMode });
+        return { command, outputPath, prompt, label: "Code Review", model, reasoningEffort, fastMode: fastMode || undefined };
       }
 
       if (provider === "claude") {
+        const model = typeof config?.model === "string" && config.model ? config.model : undefined;
+        const effort = typeof config?.effort === "string" && config.effort ? config.effort : undefined;
         const prompt = CLAUDE_REVIEW_PROMPT + "\n\n---\n\n" + userMessage;
-        const { command, stdinPrompt } = buildClaudeCommand(prompt);
-        return { command, stdinPrompt, prompt, cwd, label: "Claude Code Review", captureStdout: true };
+        const { command, stdinPrompt } = buildClaudeCommand(prompt, model, effort);
+        return { command, stdinPrompt, prompt, cwd, label: "Code Review", captureStdout: true, model, effort };
       }
 
       return null;
     },
 
     async onJobComplete(job, meta) {
-      const cwd = options.agentCwd ?? resolveVcsCwd(currentDiffType, gitContext?.cwd) ?? process.cwd();
+      const cwd = resolveAgentCwd();
 
       // --- Codex path ---
       if (job.provider === "codex" && meta.outputPath) {
@@ -209,6 +224,21 @@ export async function startReviewServer(
           const annotations = transformClaudeFindings(output.findings, job.source, cwd);
           const result = externalAnnotations.addAnnotations({ annotations });
           if ("error" in result) console.error(`[claude-review] addAnnotations error:`, result.error);
+        }
+        return;
+      }
+
+      // --- Tour path ---
+      if (job.provider === "tour") {
+        const { summary } = await tour.onJobComplete({ job, meta });
+        if (summary) {
+          job.summary = summary;
+        } else {
+          // The process exited 0 but the model returned empty or malformed output
+          // and nothing was stored. Flip status so the client doesn't auto-open
+          // a successful-looking card that 404s on /api/tour/:id.
+          job.status = "failed";
+          job.error = TOUR_EMPTY_OUTPUT_ERROR;
         }
         return;
       }
@@ -356,6 +386,27 @@ export async function startReviewServer(
 
         async fetch(req, server) {
           const url = new URL(req.url);
+
+          // API: Get tour result
+          if (url.pathname.match(/^\/api\/tour\/[^/]+$/) && req.method === "GET") {
+            const jobId = url.pathname.slice("/api/tour/".length);
+            const result = tour.getTour(jobId);
+            if (!result) return Response.json({ error: "Tour not found" }, { status: 404 });
+            return Response.json(result);
+          }
+
+          // API: Save tour checklist state
+          const checklistMatch = url.pathname.match(/^\/api\/tour\/([^/]+)\/checklist$/);
+          if (checklistMatch && req.method === "PUT") {
+            const jobId = checklistMatch[1];
+            try {
+              const body = await req.json() as { checked: boolean[] };
+              if (Array.isArray(body.checked)) tour.saveChecklist(jobId, body.checked);
+              return Response.json({ ok: true });
+            } catch {
+              return Response.json({ error: "Invalid JSON" }, { status: 400 });
+            }
+          }
 
           // API: Get diff content
           if (url.pathname === "/api/diff" && req.method === "GET") {

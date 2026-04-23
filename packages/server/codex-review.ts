@@ -226,15 +226,21 @@ export interface CodexCommandOptions {
   cwd: string;
   outputPath: string;
   prompt: string;
+  model?: string;
+  reasoningEffort?: string;
+  fastMode?: boolean;
 }
 
 /** Build the `codex exec` argv array. Materializes the schema file on first call. */
 export async function buildCodexCommand(options: CodexCommandOptions): Promise<string[]> {
-  const { cwd, outputPath, prompt } = options;
+  const { cwd, outputPath, prompt, model, reasoningEffort, fastMode } = options;
   const schemaPath = await ensureSchemaFile();
 
   const command = [
     "codex",
+    ...(model ? ["-m", model] : []),
+    ...(reasoningEffort ? ["-c", `model_reasoning_effort=${reasoningEffort}`] : []),
+    ...(fastMode ? ["-c", "service_tier=fast"] : []),
     "exec",
     "--output-schema", schemaPath,
     "-o", outputPath,

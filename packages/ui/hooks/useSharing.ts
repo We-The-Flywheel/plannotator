@@ -307,7 +307,7 @@ export function useSharing(
           return { success: false, count: 0, planTitle: '', error: 'Invalid share URL: empty hash' };
         }
 
-        payload = await decompress(hash);
+        payload = (await decompress(hash)) as SharePayload;
       }
 
       // Extract plan title from embedded plan text
