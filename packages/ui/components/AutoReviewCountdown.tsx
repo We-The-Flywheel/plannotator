@@ -112,7 +112,7 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
   onReviewComplete,
   hasAnnotations,
   disabled = false,
-  countdownSeconds = 30,
+  countdownSeconds = 8,
   approvalCountdownSeconds = 10,
   reviewAlreadyDone = false,
 }) => {
@@ -460,8 +460,12 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
         }
 
         if (policyAllows) {
-          onAutoApprove();
-          actions.setPhase('done');
+          // Hand off to approval_countdown — the tick loop fires onAutoApprove
+          // when it hits 0. Decoupling from this promise chain ensures
+          // auto-approve isn't lost if the parent re-renders mid-flow, and
+          // gives React time to flush the setMarkdown(newPlan) from
+          // onPlanRevised before /api/approve reads it.
+          actions.beginCountdown('approval_countdown', approvalCountdownSeconds);
         } else {
           // Stay in 'applying' phase visually; user must approve manually.
           actions.setPhase('idle');
@@ -476,7 +480,7 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
     },
     // `actions` is stable (memoized inside the provider) so omitting it is safe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [countdownSeconds, onPlanRevised, onAnnotationsCleared, onReviewComplete],
+    [countdownSeconds, approvalCountdownSeconds, onPlanRevised, onAnnotationsCleared, onReviewComplete],
   );
 
   const handlePause = () => {
