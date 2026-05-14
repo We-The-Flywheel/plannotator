@@ -12,7 +12,7 @@ import { GitHubIcon } from '@plannotator/ui/components/GitHubIcon';
 import { GitLabIcon } from '@plannotator/ui/components/GitLabIcon';
 import { RepoIcon } from '@plannotator/ui/components/RepoIcon';
 import { PullRequestIcon } from '@plannotator/ui/components/PullRequestIcon';
-import { getPlatformLabel, getMRLabel, getMRNumberLabel, getDisplayRepo } from '@plannotator/shared/pr-provider';
+import { getPlatformLabel, getMRLabel, getMRNumberLabel, getDisplayRepo } from '@plannotator/shared/pr-types';
 import { configStore, useConfigValue } from '@plannotator/ui/config';
 import { loadDiffFont } from '@plannotator/ui/utils/diffFonts';
 import { getAgentSwitchSettings, getEffectiveAgentName } from '@plannotator/ui/utils/agentSwitch';
@@ -59,7 +59,7 @@ import {
 } from './dock/reviewPanelTypes';
 import type { DiffFile } from './types';
 import type { DiffOption, WorktreeInfo, GitContext } from '@plannotator/shared/types';
-import type { PRMetadata } from '@plannotator/shared/pr-provider';
+import type { PRMetadata } from '@plannotator/shared/pr-types';
 import { altKey } from '@plannotator/ui/utils/platform';
 import { TourDialog } from './components/tour/TourDialog';
 import { DEMO_TOUR_ID } from './demoTour';

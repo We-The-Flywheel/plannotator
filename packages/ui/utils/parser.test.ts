@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { parseMarkdownToBlocks, computeListIndices } from "./parser";
+import { parseMarkdownToBlocks, computeListIndices, extractFrontmatter, exportAnnotations } from "./parser";
 import type { Block } from "../types";
 
 /** Tiny factory for list-item blocks used by computeListIndices tests. */
@@ -250,8 +250,63 @@ describe("parseMarkdownToBlocks — list continuation lines", () => {
     expect(blocks[1].content).toBe("Not indented");
   });
 
-  test("blank line between list item and indented text prevents merging", () => {
+  test("blank line between list item and indented text merges as loose continuation", () => {
     const md = "- Item\n\n  Indented paragraph";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("list-item");
+    expect(blocks[0].content).toBe("Item\n\nIndented paragraph");
+  });
+
+  test("loose continuation with multiple paragraphs", () => {
+    const md = "- Item\n\n  Para one\n\n  Para two";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("list-item");
+    expect(blocks[0].content).toBe("Item\n\nPara one\n\nPara two");
+  });
+
+  test("loose continuation stops at non-indented line", () => {
+    const md = "- Item\n\n  Indented\n\nNot indented";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("list-item");
+    expect(blocks[0].content).toBe("Item\n\nIndented");
+    expect(blocks[1].type).toBe("paragraph");
+    expect(blocks[1].content).toBe("Not indented");
+  });
+
+  test("loose continuation stops at next list item", () => {
+    const md = "- First\n\n  Body of first\n\n- Second";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("list-item");
+    expect(blocks[0].content).toBe("First\n\nBody of first");
+    expect(blocks[1].type).toBe("list-item");
+    expect(blocks[1].content).toBe("Second");
+  });
+
+  test("loose continuation works with ordered lists", () => {
+    const md = "1. First\n\n   Body of first\n\n2. Second";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("list-item");
+    expect(blocks[0].ordered).toBe(true);
+    expect(blocks[0].content).toBe("First\n\nBody of first");
+    expect(blocks[1].type).toBe("list-item");
+    expect(blocks[1].content).toBe("Second");
+  });
+
+  test("loose continuation with mixed tight and loose lines", () => {
+    const md = "- Item\n\n  Para one\n  still para one\n\n  Para two";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("list-item");
+    expect(blocks[0].content).toBe("Item\n\nPara one\nstill para one\n\nPara two");
+  });
+
+  test("single-space indent after blank line does not merge (insufficient indentation)", () => {
+    const md = "- Item\n\n Barely indented";
     const blocks = parseMarkdownToBlocks(md);
     expect(blocks).toHaveLength(2);
     expect(blocks[0].type).toBe("list-item");
@@ -831,5 +886,107 @@ describe("computeListIndices", () => {
   test("single ordered item with no orderedStart defaults to 1", () => {
     const blocks = [{ ...li(0, true), orderedStart: undefined }];
     expect(computeListIndices(blocks)).toEqual([1]);
+  });
+});
+
+describe("extractFrontmatter — contentStartLine", () => {
+  test("no frontmatter → contentStartLine is 1", () => {
+    const { contentStartLine } = extractFrontmatter("# Hello\nworld");
+    expect(contentStartLine).toBe(1);
+  });
+
+  test("standard frontmatter offsets correctly", () => {
+    const md = "---\ntitle: foo\ndate: bar\n---\n# Hello";
+    const { contentStartLine, content } = extractFrontmatter(md);
+    expect(content).toBe("# Hello");
+    expect(contentStartLine).toBe(5);
+  });
+
+  test("frontmatter with blank line before content", () => {
+    const md = "---\ntitle: foo\n---\n\n# Hello";
+    const { contentStartLine } = extractFrontmatter(md);
+    expect(contentStartLine).toBe(5);
+  });
+
+  test("unclosed frontmatter treated as no frontmatter", () => {
+    const md = "---\ntitle: foo\n# Not closed";
+    const { contentStartLine, content } = extractFrontmatter(md);
+    expect(contentStartLine).toBe(1);
+    expect(content).toBe(md);
+  });
+});
+
+describe("parseMarkdownToBlocks — startLine accuracy", () => {
+  test("basic blocks get correct startLine", () => {
+    const md = "# Heading\n\nParagraph\n\n- Item";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks[0].startLine).toBe(1); // # Heading
+    expect(blocks[1].startLine).toBe(3); // Paragraph
+    expect(blocks[2].startLine).toBe(5); // - Item
+  });
+
+  test("code block startLine points to the opening fence", () => {
+    const md = "intro\n\n```ts\nconst x = 1;\nconst y = 2;\n```\n\noutro";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks[0].startLine).toBe(1); // intro
+    expect(blocks[1].startLine).toBe(3); // ```ts
+    expect(blocks[1].type).toBe("code");
+    expect(blocks[2].startLine).toBe(8); // outro
+  });
+
+  test("frontmatter shifts all startLines", () => {
+    const md = "---\ntitle: test\n---\n\n# Heading\n\nParagraph";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks[0].type).toBe("heading");
+    expect(blocks[0].startLine).toBe(5);
+    expect(blocks[1].type).toBe("paragraph");
+    expect(blocks[1].startLine).toBe(7);
+  });
+
+  test("table gets correct startLine", () => {
+    const md = "# Title\n\n| A | B |\n|---|---|\n| 1 | 2 |";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks[1].type).toBe("table");
+    expect(blocks[1].startLine).toBe(3);
+  });
+});
+
+describe("exportAnnotations — line labels", () => {
+  const blocks = parseMarkdownToBlocks("# Heading\n\nShort paragraph\n\n```ts\nline1\nline2\nline3\n```");
+
+  test("single-line block shows 'line N'", () => {
+    const anns = [{ blockId: blocks[0].id, type: "COMMENT", text: "fix this", originalText: "Heading", startOffset: 0 }];
+    const output = exportAnnotations(blocks, anns);
+    expect(output).toContain("(line 1)");
+  });
+
+  test("multi-line code block shows line range", () => {
+    const codeBlock = blocks.find(b => b.type === "code")!;
+    const anns = [{ blockId: codeBlock.id, type: "COMMENT", text: "refactor", originalText: "line1", startOffset: 0 }];
+    const output = exportAnnotations(blocks, anns);
+    expect(output).toMatch(/\(lines 5–9\)/);
+  });
+
+  test("GLOBAL_COMMENT has no line label", () => {
+    const anns = [{ blockId: "global", type: "GLOBAL_COMMENT", text: "overall feedback", originalText: "", startOffset: 0 }];
+    const output = exportAnnotations(blocks, anns);
+    expect(output).not.toMatch(/\(line/);
+  });
+
+  test("diff-context annotation shows label instead of line number", () => {
+    const anns = [{ blockId: blocks[0].id, type: "COMMENT", text: "change", originalText: "Heading", startOffset: 0, diffContext: "added" }];
+    const output = exportAnnotations(blocks, anns);
+    expect(output).not.toMatch(/\(line/);
+    expect(output).toContain("[In diff content]");
+  });
+
+  test("sourceConverted adds caveat", () => {
+    const output = exportAnnotations(blocks, [{ blockId: blocks[0].id, type: "COMMENT", text: "ok", originalText: "Heading", startOffset: 0 }], [], "Feedback", "plan", { sourceConverted: true });
+    expect(output).toContain("converted markdown");
+  });
+
+  test("no sourceConverted means no caveat", () => {
+    const output = exportAnnotations(blocks, [{ blockId: blocks[0].id, type: "COMMENT", text: "ok", originalText: "Heading", startOffset: 0 }]);
+    expect(output).not.toContain("converted markdown");
   });
 });

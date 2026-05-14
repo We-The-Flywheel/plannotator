@@ -18,12 +18,20 @@ import {
   startAnnotateServer,
   handleAnnotateServerReady,
 } from "@plannotator/server/annotate";
-import { getGitContext, runGitDiffWithContext } from "@plannotator/server/git";
+import { type DiffType, prepareLocalReviewDiff } from "@plannotator/server/vcs";
 import { parsePRUrl, checkPRAuth, fetchPR, getCliName, getMRLabel, getMRNumberLabel, getDisplayRepo } from "@plannotator/server/pr";
 import { loadConfig, resolveDefaultDiffType, resolveUseJina } from "@plannotator/shared/config";
-import { resolveMarkdownFile, resolveUserPath } from "@plannotator/shared/resolve-file";
+import {
+  getReviewApprovedPrompt,
+  getReviewDeniedSuffix,
+  getAnnotateFileFeedbackPrompt,
+} from "@plannotator/shared/prompts";
+import { resolveMarkdownFile, resolveUserPath, hasMarkdownFiles } from "@plannotator/shared/resolve-file";
+import { FILE_BROWSER_EXCLUDED } from "@plannotator/shared/reference-common";
 import { htmlToMarkdown } from "@plannotator/shared/html-to-markdown";
-import { urlToMarkdown } from "@plannotator/shared/url-to-markdown";
+import { parseAnnotateArgs } from "@plannotator/shared/annotate-args";
+import { parseReviewArgs } from "@plannotator/shared/review-args";
+import { urlToMarkdown, isConvertedSource } from "@plannotator/shared/url-to-markdown";
 import { statSync } from "fs";
 import path from "path";
 
@@ -45,14 +53,15 @@ export async function handleReviewCommand(
   const { client, reviewHtmlContent, getSharingEnabled, getShareBaseUrl, directory } = deps;
 
   // @ts-ignore - Event properties contain arguments
-  const urlArg: string = event.properties?.arguments || "";
-  const isPRMode = urlArg?.startsWith("http://") || urlArg?.startsWith("https://");
+  const reviewArgs = parseReviewArgs(event.properties?.arguments || "");
+  const urlArg = reviewArgs.prUrl;
+  const isPRMode = urlArg !== undefined;
 
   let rawPatch: string;
   let gitRef: string;
   let diffError: string | undefined;
-  let userDiffType: import("@plannotator/shared/config").DefaultDiffType | undefined;
-  let gitContext: Awaited<ReturnType<typeof getGitContext>> | undefined;
+  let userDiffType: DiffType | undefined;
+  let gitContext: Awaited<ReturnType<typeof prepareLocalReviewDiff>>["gitContext"] | undefined;
   let prMetadata: Awaited<ReturnType<typeof fetchPR>>["metadata"] | undefined;
 
   if (isPRMode) {
@@ -84,11 +93,17 @@ export async function handleReviewCommand(
   } else {
     client.app.log({ level: "info", message: "Opening code review UI..." });
 
-    gitContext = await getGitContext(directory);
-    userDiffType = resolveDefaultDiffType(loadConfig());
-    const diffResult = await runGitDiffWithContext(userDiffType, gitContext);
-    rawPatch = diffResult.patch;
-    gitRef = diffResult.label;
+    const config = loadConfig();
+    const diffResult = await prepareLocalReviewDiff({
+      cwd: directory,
+      vcsType: reviewArgs.vcsType,
+      configuredDiffType: resolveDefaultDiffType(config),
+      hideWhitespace: config.diffOptions?.hideWhitespace ?? false,
+    });
+    gitContext = diffResult.gitContext;
+    userDiffType = diffResult.diffType;
+    rawPatch = diffResult.rawPatch;
+    gitRef = diffResult.gitRef;
     diffError = diffResult.error;
   }
 
@@ -104,7 +119,12 @@ export async function handleReviewCommand(
     shareBaseUrl: getShareBaseUrl(),
     htmlContent: reviewHtmlContent,
     opencodeClient: client,
-    onReady: handleReviewServerReady,
+    onReady: (url, isRemote, port) => {
+      handleReviewServerReady(url, isRemote, port);
+      if (isRemote) {
+        client.app.log({ level: "info", message: `[Plannotator] Open in browser: ${url}` });
+      }
+    },
   });
 
   const result = await server.waitForDecision();
@@ -124,10 +144,10 @@ export async function handleReviewCommand(
       const targetAgent = result.agentSwitch || "build";
 
       const message = result.approved
-        ? "# Code Review\n\nCode review completed — no changes requested."
+        ? getReviewApprovedPrompt("opencode")
         : isPRMode
           ? result.feedback
-          : `${result.feedback}\n\nPlease address this feedback.`;
+          : `${result.feedback}${getReviewDeniedSuffix("opencode")}`;
 
       try {
         await client.session.prompt({
@@ -148,19 +168,29 @@ export async function handleAnnotateCommand(
   event: any,
   deps: CommandDeps
 ) {
-  const { client, htmlContent, getSharingEnabled, getShareBaseUrl, getPasteApiUrl } = deps;
+  const { client, htmlContent, getSharingEnabled, getShareBaseUrl, getPasteApiUrl, directory } = deps;
 
   // @ts-ignore - Event properties contain arguments
-  const filePath = event.properties?.arguments || event.arguments || "";
+  const rawArgs = event.properties?.arguments || event.arguments || "";
+  // #570: split --gate / --json out of the args; rest is the file path.
+  // --json is accepted silently (OpenCode writes to session, not stdout).
+  // parseAnnotateArgs strips leading @ on filePath (reference-mode convention).
+  // `rawFilePath` preserves it for the scoped-package markdown fallback.
+  const { filePath, rawFilePath, gate, renderHtml: renderHtmlFlag } = parseAnnotateArgs(rawArgs);
 
   if (!filePath) {
-    client.app.log({ level: "error", message: "Usage: /plannotator-annotate <file.md | file.html | https://...>" });
+    client.app.log({ level: "error", message: "Usage: /plannotator-annotate <file.md | file.html | https://... | folder/> [--gate] [--json]" });
     return;
   }
 
   let markdown: string;
+  let rawHtml: string | undefined;
   let absolutePath: string;
+  let folderPath: string | undefined;
+  let annotateMode: "annotate" | "annotate-folder" = "annotate";
+  let isFolder = false;
   let sourceInfo: string | undefined;
+  let sourceConverted = false;
 
   // --- URL annotation ---
   const isUrl = /^https?:\/\//i.test(filePath);
@@ -171,6 +201,7 @@ export async function handleAnnotateCommand(
     try {
       const result = await urlToMarkdown(filePath, { useJina });
       markdown = result.markdown;
+      sourceConverted = isConvertedSource(result.source);
     } catch (err) {
       client.app.log({ level: "error", message: `Failed to fetch URL: ${err instanceof Error ? err.message : String(err)}` });
       return;
@@ -178,11 +209,26 @@ export async function handleAnnotateCommand(
     absolutePath = filePath;
     sourceInfo = filePath;
   } else {
-    const projectRoot = process.cwd();
+    const projectRoot = directory || process.cwd();
     const resolvedArg = resolveUserPath(filePath, projectRoot);
 
-    if (/\.html?$/i.test(resolvedArg)) {
-      // HTML file annotation — convert to markdown via Turndown
+    try {
+      isFolder = statSync(resolvedArg).isDirectory();
+    } catch {
+      // Not a directory, fall through to file resolution.
+    }
+
+    if (isFolder) {
+      if (!hasMarkdownFiles(resolvedArg, FILE_BROWSER_EXCLUDED, /\.(mdx?|html?)$/i)) {
+        client.app.log({ level: "error", message: `No markdown or HTML files found in ${resolvedArg}` });
+        return;
+      }
+      folderPath = resolvedArg;
+      absolutePath = resolvedArg;
+      markdown = "";
+      annotateMode = "annotate-folder";
+      client.app.log({ level: "info", message: `Opening annotation UI for folder ${resolvedArg}...` });
+    } else if (/\.html?$/i.test(resolvedArg)) {
       let fileSize: number;
       try {
         fileSize = statSync(resolvedArg).size;
@@ -195,14 +241,24 @@ export async function handleAnnotateCommand(
         return;
       }
       const html = await Bun.file(resolvedArg).text();
-      markdown = htmlToMarkdown(html);
+      if (renderHtmlFlag) {
+        rawHtml = html;
+        markdown = "";
+      } else {
+        markdown = htmlToMarkdown(html);
+        sourceConverted = true;
+      }
       absolutePath = resolvedArg;
       sourceInfo = path.basename(resolvedArg);
-      client.app.log({ level: "info", message: `Converted: ${absolutePath}` });
+      client.app.log({ level: "info", message: `${renderHtmlFlag ? "Raw HTML" : "Converted"}: ${absolutePath}` });
     } else {
       // Markdown file annotation
       client.app.log({ level: "info", message: `Opening annotation UI for ${filePath}...` });
-      const resolved = await resolveMarkdownFile(filePath, projectRoot);
+      // Strip-first with literal-@ fallback (scoped-package-style names).
+      let resolved = await resolveMarkdownFile(filePath, projectRoot);
+      if (resolved.kind === "not_found" && rawFilePath !== filePath) {
+        resolved = await resolveMarkdownFile(rawFilePath, projectRoot);
+      }
 
       if (resolved.kind === "ambiguous") {
         client.app.log({
@@ -226,19 +282,31 @@ export async function handleAnnotateCommand(
     markdown,
     filePath: absolutePath,
     origin: "opencode",
+    mode: annotateMode,
+    folderPath,
     sourceInfo,
+    sourceConverted,
+    rawHtml,
+    renderHtml: renderHtmlFlag,
     sharingEnabled: await getSharingEnabled(),
     shareBaseUrl: getShareBaseUrl(),
     pasteApiUrl: getPasteApiUrl(),
+    gate,
     htmlContent,
-    onReady: handleAnnotateServerReady,
+    onReady: (url, isRemote, port) => {
+      handleAnnotateServerReady(url, isRemote, port);
+      if (isRemote) {
+        client.app.log({ level: "info", message: `[Plannotator] Open in browser: ${url}` });
+      }
+    },
   });
 
   const result = await server.waitForDecision();
   await Bun.sleep(1500);
   server.stop();
 
-  if (result.exit) {
+  // Both exit and approve are "no-op for the agent" — skip session injection.
+  if (result.exit || result.approved) {
     return;
   }
 
@@ -253,7 +321,11 @@ export async function handleAnnotateCommand(
           body: {
             parts: [{
               type: "text",
-              text: `# Markdown Annotations\n\nFile: ${absolutePath}\n\n${result.feedback}\n\nPlease address the annotation feedback above.`,
+              text: getAnnotateFileFeedbackPrompt("opencode", undefined, {
+                fileHeader: isFolder ? "Folder" : "File",
+                filePath: absolutePath,
+                feedback: result.feedback,
+              }),
             }],
           },
         });
@@ -274,6 +346,11 @@ export async function handleAnnotateLastCommand(
   deps: CommandDeps
 ): Promise<string | null> {
   const { client, htmlContent, getSharingEnabled, getShareBaseUrl, getPasteApiUrl } = deps;
+
+  // @ts-ignore - Event properties contain arguments
+  const rawArgs = event.properties?.arguments || event.arguments || "";
+  // #570: support --gate on /plannotator-last (Stop-hook review-gate pattern).
+  const { gate } = parseAnnotateArgs(rawArgs);
 
   // @ts-ignore - Event properties contain sessionID
   const sessionId = event.properties?.sessionID;
@@ -320,15 +397,22 @@ export async function handleAnnotateLastCommand(
     sharingEnabled: await getSharingEnabled(),
     shareBaseUrl: getShareBaseUrl(),
     pasteApiUrl: getPasteApiUrl(),
+    gate,
     htmlContent,
-    onReady: handleAnnotateServerReady,
+    onReady: (url, isRemote, port) => {
+      handleAnnotateServerReady(url, isRemote, port);
+      if (isRemote) {
+        client.app.log({ level: "info", message: `[Plannotator] Open in browser: ${url}` });
+      }
+    },
   });
 
   const result = await server.waitForDecision();
   await Bun.sleep(1500);
   server.stop();
 
-  if (result.exit) {
+  // Both exit and approve signal "don't inject feedback" — return null.
+  if (result.exit || result.approved) {
     return null;
   }
 
@@ -351,7 +435,12 @@ export async function handleArchiveCommand(
     shareBaseUrl: getShareBaseUrl(),
     pasteApiUrl: getPasteApiUrl(),
     htmlContent,
-    onReady: handleServerReady,
+    onReady: (url, isRemote, port) => {
+      handleServerReady(url, isRemote, port);
+      if (isRemote) {
+        client.app.log({ level: "info", message: `[Plannotator] Open in browser: ${url}` });
+      }
+    },
   });
 
   if (server.waitForDone) {

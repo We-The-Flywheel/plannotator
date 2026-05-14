@@ -9,6 +9,8 @@ import { CodeBlock } from './blocks/CodeBlock';
 import { TableBlock } from './blocks/TableBlock';
 import { TableToolbar } from './blocks/TableToolbar';
 import { TablePopout } from './blocks/TablePopout';
+import { CodePathValidationContext } from './CodePathValidationContext';
+import { useValidatedCodePaths } from '../hooks/useValidatedCodePaths';
 import { ListMarker } from './ListMarker';
 import { AnnotationToolbar } from './AnnotationToolbar';
 import { FloatingQuickLabelPicker } from './FloatingQuickLabelPicker';
@@ -45,6 +47,7 @@ import { PinpointOverlay } from './PinpointOverlay';
 import { usePinpoint } from '../hooks/usePinpoint';
 import { useAnnotationHighlighter } from '../hooks/useAnnotationHighlighter';
 import { useScrollViewport } from '../hooks/useScrollViewport';
+import { decodeAnchorHash } from '../utils/anchors';
 
 interface ViewerProps {
   blocks: Block[];
@@ -63,7 +66,12 @@ interface ViewerProps {
   repoInfo?: { display: string; branch?: string; host?: string } | null;
   stickyActions?: boolean;
   onOpenLinkedDoc?: (path: string) => void;
+  onOpenCodeFile?: (path: string) => void;
   imageBaseDir?: string;
+  /** Directory the active document lives in — used by the code-path validator
+   *  so out-of-tree relative references (e.g. `../foo.ts` in a linked doc)
+   *  resolve against the doc's own directory rather than only cwd. */
+  codePathBaseDir?: string;
   linkedDocInfo?: { filepath: string; onBack: () => void; label?: string; backLabel?: string } | null;
   // Plan diff props
   planDiffStats?: { additions: number; deletions: number; modifications: number } | null;
@@ -152,8 +160,10 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   showDemoBadge,
   maxWidth,
   onOpenLinkedDoc,
+  onOpenCodeFile,
   linkedDocInfo,
   imageBaseDir,
+  codePathBaseDir,
   copyLabel,
   actionsLabelMode = 'full',
   archiveInfo,
@@ -163,6 +173,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
 }, ref) => {
   const [copied, setCopied] = useState(false);
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
+  const [locationHash, setLocationHash] = useState(() => window.location.hash);
   const globalCommentButtonRef = useRef<HTMLButtonElement>(null);
 
   const handleCopyPlan = async () => {
@@ -200,6 +211,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   } | null>(null);
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const stickySentinelRef = useRef<HTMLDivElement>(null);
+  const lastAutoScrolledHashRef = useRef<string | null>(null);
   const [isStuck, setIsStuck] = useState(false);
 
   // Shared annotation infrastructure via hook
@@ -293,6 +305,55 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     observer.observe(stickySentinelRef.current);
     return () => observer.disconnect();
   }, [stickyActions, stickyScrollViewport]);
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      lastAutoScrolledHashRef.current = null;
+      setLocationHash(window.location.hash);
+    };
+
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
+
+  const scrollToAnchor = useCallback((hash: string) => {
+    const anchor = decodeAnchorHash(hash);
+    if (!anchor) return false;
+
+    const container = containerRef.current;
+    if (!container || !stickyScrollViewport) return false;
+
+    const target = document.getElementById(anchor);
+    if (!target || !container.contains(target)) return false;
+
+    const stickyActionsEl = container.querySelector<HTMLElement>('[data-sticky-actions]');
+    const stickyTop = stickyActionsEl
+      ? Number.parseFloat(window.getComputedStyle(stickyActionsEl).top || '0') || 0
+      : 0;
+    const headerOffset = stickyActionsEl
+      ? stickyActionsEl.getBoundingClientRect().height + stickyTop
+      : 0;
+    const containerRect = stickyScrollViewport.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const relativeTop = targetRect.top - containerRect.top;
+    const offsetPosition = stickyScrollViewport.scrollTop + relativeTop - headerOffset;
+
+    stickyScrollViewport.scrollTo({
+      top: Math.max(0, offsetPosition),
+      behavior: 'smooth',
+    });
+    return true;
+  }, [stickyScrollViewport]);
+
+  useEffect(() => {
+    if (!stickyScrollViewport || !locationHash || lastAutoScrolledHashRef.current === locationHash) return;
+    const timer = window.setTimeout(() => {
+      if (scrollToAnchor(locationHash)) {
+        lastAutoScrolledHashRef.current = locationHash;
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [blocks, locationHash, scrollToAnchor, stickyScrollViewport]);
 
   // Cmd+C / Ctrl+C keyboard shortcut for copying selected text
   useEffect(() => {
@@ -456,7 +517,10 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     setViewerCommentPopover(null);
   }, []);
 
+  const codePathValidation = useValidatedCodePaths(markdown, codePathBaseDir);
+
   return (
+    <CodePathValidationContext.Provider value={codePathValidation}>
     <div className="relative z-50 w-full" style={maxWidth === null ? undefined : { maxWidth: maxWidth ?? 832 }}>
       {taterMode && <TaterSpriteSitting />}
       <article
@@ -559,10 +623,12 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                       block={block}
                       orderedIndex={indices[i]}
                       onOpenLinkedDoc={onOpenLinkedDoc}
+                      onOpenCodeFile={onOpenCodeFile}
                       onToggleCheckbox={onToggleCheckbox}
                       checkboxOverrides={checkboxOverrides}
                       githubRepo={repoInfo?.display}
                       headingAnchorId={headingSlugMap.get(block.id)}
+                      onNavigateAnchor={scrollToAnchor}
                     />
                   ))}
                 </div>
@@ -579,7 +645,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               imageBaseDir={imageBaseDir}
               onImageClick={(src, alt) => setLightbox({ src, alt })}
               onOpenLinkedDoc={onOpenLinkedDoc}
+              onOpenCodeFile={onOpenCodeFile}
               githubRepo={repoInfo?.display}
+              onNavigateAnchor={scrollToAnchor}
               onHover={(element) => {
                 if (tableHoverTimeoutRef.current) {
                   clearTimeout(tableHoverTimeoutRef.current);
@@ -631,7 +699,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               isHovered={inputMethod !== 'pinpoint' && hoveredCodeBlock?.block.id === group.block.id}
             />
           ) : (
-            <BlockRenderer imageBaseDir={imageBaseDir} onImageClick={(src, alt) => setLightbox({ src, alt })} key={group.block.id} block={group.block} onOpenLinkedDoc={onOpenLinkedDoc} onToggleCheckbox={onToggleCheckbox} checkboxOverrides={checkboxOverrides} githubRepo={repoInfo?.display} headingAnchorId={headingSlugMap.get(group.block.id)} />
+            <BlockRenderer imageBaseDir={imageBaseDir} onImageClick={(src, alt) => setLightbox({ src, alt })} key={group.block.id} block={group.block} onOpenLinkedDoc={onOpenLinkedDoc} onOpenCodeFile={onOpenCodeFile} onNavigateAnchor={scrollToAnchor} onToggleCheckbox={onToggleCheckbox} checkboxOverrides={checkboxOverrides} githubRepo={repoInfo?.display} headingAnchorId={headingSlugMap.get(group.block.id)} />
           )
         )}
 
@@ -727,7 +795,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             imageBaseDir={imageBaseDir}
             onImageClick={(src, alt) => setLightbox({ src, alt })}
             onOpenLinkedDoc={onOpenLinkedDoc}
+            onOpenCodeFile={onOpenCodeFile}
             githubRepo={repoInfo?.display}
+            onNavigateAnchor={scrollToAnchor}
           />
         )}
 
@@ -795,6 +865,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         document.body
       )}
     </div>
+    </CodePathValidationContext.Provider>
   );
 });
 
@@ -853,7 +924,5 @@ function groupBlocks(blocks: Block[]): RenderGroup[] {
   }
   return groups;
 }
-
-
 
 

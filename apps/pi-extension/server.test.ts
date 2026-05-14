@@ -4,11 +4,18 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getGitContext, runGitDiff, startReviewServer } from "./server";
+import {
+  getGitContext,
+  getVcsContext,
+  prepareLocalReviewDiff,
+  runGitDiff,
+  startReviewServer,
+} from "./server";
 
 const tempDirs: string[] = [];
 const originalCwd = process.cwd();
 const originalHome = process.env.HOME;
+const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 const originalPort = process.env.PLANNOTATOR_PORT;
 
 function makeTempDir(prefix: string): string {
@@ -17,10 +24,26 @@ function makeTempDir(prefix: string): string {
   return dir;
 }
 
+function childEnv(): NodeJS.ProcessEnv {
+  return { ...process.env };
+}
+
 function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf-8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf-8", env: childEnv() });
   if (result.status !== 0) {
     throw new Error(result.stderr || `git ${args.join(" ")} failed`);
+  }
+  return result.stdout.trim();
+}
+
+function hasJj(): boolean {
+  return spawnSync("jj", ["--version"], { encoding: "utf-8", env: childEnv() }).status === 0;
+}
+
+function jj(cwd: string, args: string[]): string {
+  const result = spawnSync("jj", ["-R", cwd, ...args], { encoding: "utf-8", env: childEnv() });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || `jj ${args.join(" ")} failed`);
   }
   return result.stdout.trim();
 }
@@ -35,6 +58,28 @@ function initRepo(): string {
   writeFileSync(join(repoDir, "tracked.txt"), "before\n", "utf-8");
   git(repoDir, ["add", "tracked.txt"]);
   git(repoDir, ["commit", "-m", "initial"]);
+
+  return repoDir;
+}
+
+function initJjRepo(): string {
+  const repoDir = initRepo();
+  writeFileSync(join(repoDir, "spacey.ts"), "const x = 1;\n", "utf-8");
+  git(repoDir, ["add", "spacey.ts"]);
+  git(repoDir, ["commit", "-m", "add spacey file"]);
+
+  const init = spawnSync("jj", ["git", "init", "--colocate", repoDir], { encoding: "utf-8", env: childEnv() });
+  if (init.status !== 0) {
+    throw new Error(init.stderr || "jj git init --colocate failed");
+  }
+  jj(repoDir, ["config", "set", "--repo", "user.name", "Pi Review"]);
+  jj(repoDir, ["config", "set", "--repo", "user.email", "pi-review@example.com"]);
+
+  writeFileSync(join(repoDir, "last.txt"), "last\n", "utf-8");
+  jj(repoDir, ["commit", "-m", "add last change"]);
+
+  writeFileSync(join(repoDir, "tracked.txt"), "after\n", "utf-8");
+  writeFileSync(join(repoDir, "spacey.ts"), "const  x = 1;\n", "utf-8");
 
   return repoDir;
 }
@@ -70,6 +115,11 @@ afterEach(() => {
   } else {
     process.env.HOME = originalHome;
   }
+  if (originalXdgConfigHome === undefined) {
+    delete process.env.XDG_CONFIG_HOME;
+  } else {
+    process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+  }
   if (originalPort === undefined) {
     delete process.env.PLANNOTATOR_PORT;
   } else {
@@ -82,6 +132,8 @@ afterEach(() => {
 });
 
 describe("pi review server", () => {
+  const testIfJj = hasJj() ? test : test.skip;
+
   test("serves review diff parity endpoints including drafts, uploads, and editor annotations", async () => {
     const homeDir = makeTempDir("plannotator-pi-home-");
     const repoDir = initRepo();
@@ -305,4 +357,295 @@ describe("pi review server", () => {
       server.stop();
     }
   }, 15_000);
+
+  test("round-trips the active base branch through /api/diff and /api/diff/switch", async () => {
+    const homeDir = makeTempDir("plannotator-pi-home-");
+    const repoDir = initRepo();
+    process.env.HOME = homeDir;
+    process.chdir(repoDir);
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+
+    // Create a second branch the picker can switch to, then branch off it so
+    // currentBranch !== defaultBranch and the branch/merge-base options appear.
+    git(repoDir, ["checkout", "-b", "develop"]);
+    writeFileSync(join(repoDir, "develop-file.txt"), "develop\n", "utf-8");
+    git(repoDir, ["add", "develop-file.txt"]);
+    git(repoDir, ["commit", "-m", "develop commit"]);
+    git(repoDir, ["checkout", "-b", "feature/x"]);
+    writeFileSync(join(repoDir, "feature-file.txt"), "feature\n", "utf-8");
+    git(repoDir, ["add", "feature-file.txt"]);
+    git(repoDir, ["commit", "-m", "feature commit"]);
+
+    const gitContext = await getGitContext();
+    const diff = await runGitDiff("uncommitted", gitContext.defaultBranch);
+
+    const server = await startReviewServer({
+      rawPatch: diff.patch,
+      gitRef: diff.label,
+      error: diff.error,
+      diffType: "uncommitted",
+      gitContext,
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+
+    try {
+      // Initial load: server echoes the detected default as the active base.
+      const initial = await fetch(`${server.url}/api/diff`).then((r) => r.json()) as {
+        base?: string;
+        gitContext?: { defaultBranch: string };
+      };
+      expect(initial.base).toBe(gitContext.defaultBranch);
+      expect(initial.base).toBe(initial.gitContext?.defaultBranch);
+
+      // Switch to a custom base — response must echo the resolved base.
+      const switchResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "branch", base: "develop" }),
+      });
+      expect(switchResponse.status).toBe(200);
+      const switched = await switchResponse.json() as { base?: string; diffType: string };
+      expect(switched.base).toBe("develop");
+      expect(switched.diffType).toBe("branch");
+
+      const stageWhileOnBranch = await fetch(`${server.url}/api/git-add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath: "feature-file.txt" }),
+      });
+      expect(stageWhileOnBranch.status).toBe(400);
+      expect(await stageWhileOnBranch.json()).toEqual({ error: "Staging not available" });
+
+      // Subsequent /api/diff load reflects the switched base — this is what
+      // survives a page refresh / reconnect.
+      const rehydrate = await fetch(`${server.url}/api/diff`).then((r) => r.json()) as {
+        base?: string;
+      };
+      expect(rehydrate.base).toBe("develop");
+
+      // Unknown refs pass through verbatim — the resolver trusts callers so
+      // unusual-but-valid refs (tags, SHAs, non-origin remotes) work. Truly
+      // invalid refs surface via the diff error, not via a silent swap.
+      const unknownResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "branch", base: "nope-does-not-exist" }),
+      });
+      const unknown = await unknownResponse.json() as { base?: string; error?: string };
+      expect(unknown.base).toBe("nope-does-not-exist");
+      expect(unknown.error).toBeTruthy();
+
+      // Feedback to clean up the waitForDecision promise.
+      await fetch(`${server.url}/api/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: false, feedback: "done", annotations: [] }),
+      });
+      await server.waitForDecision();
+    } finally {
+      server.stop();
+    }
+  }, 15_000);
+
+  test("initialBase overrides gitContext.defaultBranch in server state", async () => {
+    // Simulates a programmatic caller (Pi event bus, other extensions) that
+    // opens a review against a non-default base. The server's currentBase —
+    // which drives /api/diff, agent prompts, and file-content fetches — must
+    // honor that override instead of falling back to the detected default.
+    const homeDir = makeTempDir("plannotator-pi-home-");
+    const repoDir = initRepo();
+    process.env.HOME = homeDir;
+    process.chdir(repoDir);
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+
+    git(repoDir, ["checkout", "-b", "develop"]);
+    writeFileSync(join(repoDir, "develop-file.txt"), "develop\n", "utf-8");
+    git(repoDir, ["add", "develop-file.txt"]);
+    git(repoDir, ["commit", "-m", "develop commit"]);
+    git(repoDir, ["checkout", "-b", "feature/x"]);
+
+    const gitContext = await getGitContext();
+    // Detected default is "main"; caller explicitly wants "develop".
+    expect(gitContext.defaultBranch).toBe("main");
+    const diff = await runGitDiff("branch", "develop");
+
+    const server = await startReviewServer({
+      rawPatch: diff.patch,
+      gitRef: diff.label,
+      error: diff.error,
+      diffType: "branch",
+      gitContext,
+      initialBase: "develop",
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+
+    try {
+      const payload = await fetch(`${server.url}/api/diff`).then((r) => r.json()) as {
+        base?: string;
+        gitContext?: { defaultBranch: string };
+      };
+      // The server must echo the caller's override, not the detected default.
+      expect(payload.base).toBe("develop");
+      expect(payload.gitContext?.defaultBranch).toBe("main");
+
+      await fetch(`${server.url}/api/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: false, feedback: "done", annotations: [] }),
+      });
+      await server.waitForDecision();
+    } finally {
+      server.stop();
+    }
+  }, 15_000);
+
+  testIfJj("supports JJ local review modes through the Pi server", async () => {
+    const homeDir = makeTempDir("plannotator-pi-home-");
+    process.env.HOME = homeDir;
+    process.env.XDG_CONFIG_HOME = join(homeDir, ".config");
+    const repoDir = initJjRepo();
+    process.chdir(repoDir);
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+
+    const vcsContext = await getVcsContext(repoDir);
+    expect(vcsContext.vcsType).toBe("jj");
+    const prepared = await prepareLocalReviewDiff({
+      cwd: repoDir,
+      requestedDiffType: "merge-base",
+      requestedBase: "main",
+      configuredDiffType: "unstaged",
+    });
+    expect(prepared.gitContext.vcsType).toBe("jj");
+    expect(prepared.diffType).toBe("jj-current");
+    expect(prepared.base).toBe("main@git");
+
+    const forcedGit = await prepareLocalReviewDiff({
+      cwd: repoDir,
+      vcsType: "git",
+      requestedDiffType: "unstaged",
+      configuredDiffType: "unstaged",
+    });
+    expect(forcedGit.gitContext.vcsType).toBe("git");
+    expect(forcedGit.diffType).toBe("unstaged");
+    expect(forcedGit.rawPatch).toContain("tracked.txt");
+
+    const forcedGitServer = await startReviewServer({
+      rawPatch: forcedGit.rawPatch,
+      gitRef: forcedGit.gitRef,
+      error: forcedGit.error,
+      diffType: forcedGit.diffType,
+      gitContext: forcedGit.gitContext,
+      initialBase: forcedGit.base,
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+    try {
+      const switchResponse = await fetch(`${forcedGitServer.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "merge-base", base: "main" }),
+      });
+      expect(switchResponse.status).toBe(200);
+      const switched = await switchResponse.json() as {
+        gitContext?: { vcsType?: string; diffOptions: Array<{ id: string }> };
+      };
+      expect(switched.gitContext?.vcsType).toBe("git");
+      expect(switched.gitContext?.diffOptions.map((option) => option.id)).toContain("merge-base");
+      expect(switched.gitContext?.diffOptions.map((option) => option.id)).not.toContain("jj-current");
+    } finally {
+      forcedGitServer.stop();
+    }
+
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+    const server = await startReviewServer({
+      rawPatch: prepared.rawPatch,
+      gitRef: prepared.gitRef,
+      error: prepared.error,
+      diffType: prepared.diffType,
+      gitContext: prepared.gitContext,
+      initialBase: prepared.base,
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+
+    try {
+      const initial = await fetch(`${server.url}/api/diff`).then((r) => r.json()) as {
+        diffType: string;
+        rawPatch: string;
+        base?: string;
+        gitContext?: { vcsType?: string; diffOptions: Array<{ id: string }> };
+      };
+      expect(initial.diffType).toBe("jj-current");
+      expect(initial.base).toBe("main@git");
+      expect(initial.gitContext?.vcsType).toBe("jj");
+      expect(initial.gitContext?.diffOptions.map((option) => option.id)).toEqual([
+        "jj-current",
+        "jj-last",
+        "jj-line",
+        "jj-all",
+      ]);
+      expect(initial.rawPatch).toContain("tracked.txt");
+      expect(initial.rawPatch).toContain("+after");
+
+      const lastResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "jj-last" }),
+      });
+      expect(lastResponse.status).toBe(200);
+      const last = await lastResponse.json() as { rawPatch: string; diffType: string };
+      expect(last.diffType).toBe("jj-last");
+      expect(last.rawPatch).toContain("last.txt");
+
+      for (const nextType of ["jj-line", "jj-all"] as const) {
+        const response = await fetch(`${server.url}/api/diff/switch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ diffType: nextType }),
+        });
+        expect(response.status).toBe(200);
+        const payload = await response.json() as { diffType: string; rawPatch: string };
+        expect(payload.diffType).toBe(nextType);
+        expect(payload.rawPatch).toContain("tracked.txt");
+      }
+
+      const hideWhitespaceResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "jj-current", hideWhitespace: true }),
+      });
+      expect(hideWhitespaceResponse.status).toBe(200);
+      const hidden = await hideWhitespaceResponse.json() as { rawPatch: string };
+      expect(hidden.rawPatch).toContain("+after");
+      expect(hidden.rawPatch).not.toContain("+const  x = 1;");
+
+      const fileContentResponse = await fetch(`${server.url}/api/file-content?path=tracked.txt`);
+      expect(fileContentResponse.status).toBe(200);
+      const fileContent = await fileContentResponse.json() as {
+        oldContent: string | null;
+        newContent: string | null;
+      };
+      expect(fileContent.oldContent).toBe("before\n");
+      expect(fileContent.newContent).toBe("after\n");
+
+      const stageResponse = await fetch(`${server.url}/api/git-add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath: "tracked.txt" }),
+      });
+      expect(stageResponse.status).toBe(400);
+      expect(await stageResponse.json()).toEqual({ error: "Staging not available" });
+
+      await fetch(`${server.url}/api/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: true, feedback: "LGTM", annotations: [] }),
+      });
+      await server.waitForDecision();
+    } finally {
+      server.stop();
+    }
+  }, 20_000);
 });

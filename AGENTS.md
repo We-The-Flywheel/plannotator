@@ -28,10 +28,17 @@ plannotator/
 │   │   ├── index.html
 │   │   ├── index.tsx
 │   │   └── vite.config.ts
-│   └── vscode-extension/         # VS Code extension — opens plans in editor tabs
-│       ├── bin/                   # Router scripts (open-in-vscode, xdg-open)
-│       ├── src/                   # extension.ts, cookie-proxy.ts, ipc-server.ts, panel-manager.ts, editor-annotations.ts, vscode-theme.ts
-│       └── package.json           # Extension manifest (publisher: backnotprop)
+│   ├── vscode-extension/         # VS Code extension — opens plans in editor tabs
+│   │   ├── bin/                   # Router scripts (open-in-vscode, xdg-open)
+│   │   ├── src/                   # extension.ts, cookie-proxy.ts, ipc-server.ts, panel-manager.ts, editor-annotations.ts, vscode-theme.ts
+│   │   └── package.json           # Extension manifest (publisher: backnotprop)
+│   └── skills/                    # Agent skills (agentskills.io format)
+│       ├── plannotator-review/          # Lightweight: opens review UI
+│       ├── plannotator-annotate/        # Lightweight: opens annotate UI
+│       ├── plannotator-last/            # Lightweight: annotates last message
+│       ├── plannotator-compound/        # Research analysis agent (map-reduce over denied plans)
+│       ├── plannotator-setup-goal/      # Goal package scaffolder for /goal workflows
+│       └── plannotator-visual-explainer/ # Visual HTML generator (plans, diagrams, PR explainers) with Plannotator theming
 ├── packages/
 │   ├── server/                   # Shared server implementation
 │   │   ├── index.ts              # startPlannotatorServer(), handleServerReady()
@@ -52,6 +59,13 @@ plannotator/
 │   │   │   ├── icons/            # Shared SVG icon components (themeIcons, etc.)
 │   │   │   ├── plan-diff/        # PlanDiffBadge, PlanDiffViewer, clean/raw diff views
 │   │   │   └── sidebar/          # SidebarContainer, SidebarTabs, VersionBrowser, ArchiveBrowser
+│   │   ├── shortcuts/            # Keyboard shortcut registry (see Keyboard Shortcuts section below)
+│   │   │   ├── core.ts           # Engine: parser, formatter, dispatcher, validator
+│   │   │   ├── runtime.ts        # Engine: useShortcutScope, useDoubleTapShortcuts hooks
+│   │   │   ├── index.ts          # Barrel — re-exports engine + scopes from both subfolders
+│   │   │   ├── plan-review/      # Scopes for plan-editor surfaces (annotationToolbar, annotationPanel, commentPopover, imageAnnotator, inputMethod, viewer)
+│   │   │   └── code-review/      # Scopes for review-editor surfaces (ai, allFilesDiff, annotationToolbar, fileTree, prComments, suggestionModal, tourDialog)
+│   │   ├── shortcuts.test.ts     # Registry unit tests (parser, dispatcher, validator)
 │   │   ├── utils/                # parser.ts, sharing.ts, storage.ts, planSave.ts, agentSwitch.ts, planDiffEngine.ts, planAgentInstructions.ts
 │   │   ├── hooks/                # useAnnotationHighlighter.ts, useSharing.ts, usePlanDiff.ts, useSidebar.ts, useLinkedDoc.ts, useAnnotationDraft.ts, useCodeAnnotationDraft.ts, useArchive.ts
 │   │   └── types.ts
@@ -60,9 +74,12 @@ plannotator/
 │   │   ├── storage.ts            # Plan saving, version history, archive listing (node:fs only)
 │   │   ├── draft.ts              # Annotation draft persistence (node:fs only)
 │   │   └── project.ts            # Pure string helpers (sanitizeTag, extractRepoName, extractDirName)
-│   ├── editor/                   # Plan review App.tsx
+│   ├── editor/                   # Plan review app
+│   │   ├── App.tsx               # Main plan review app
+│   │   └── shortcuts.ts          # planReviewSurface + annotateSurface — composes plan-review scopes into per-surface registries
 │   └── review-editor/            # Code review UI
 │       ├── App.tsx               # Main review app
+│       ├── shortcuts.ts          # codeReviewSurface — composes code-review scopes into the review registry
 │       ├── components/           # DiffViewer, FileTree, ReviewSidebar
 │       ├── dock/                 # Dockview center panel infrastructure
 │       ├── demoData.ts           # Demo diff for standalone mode
@@ -109,6 +126,10 @@ claude --plugin-dir ./apps/hook
 | `JINA_API_KEY` | Optional Jina Reader API key for higher rate limits (500 RPM vs 20 RPM unauthenticated). Free keys include 10M tokens. |
 | `PLANNOTATOR_VERIFY_ATTESTATION` | **Read by the install scripts only**, not by the runtime binary. Set to `1` / `true` to have `scripts/install.sh` / `install.ps1` / `install.cmd` run `gh attestation verify` on every install. Off by default. Can also be set persistently via `~/.plannotator/config.json` (`{ "verifyAttestation": true }`) or per-invocation via `--verify-attestation`. Requires `gh` installed and authenticated. |
 
+**Config-only settings (`~/.plannotator/config.json`)**: Some settings have no env-var equivalent and are toggled by editing the config file directly:
+
+- `pfmReminder` (`true` / `false`, default `false`) — when enabled, a Plannotator Flavored Markdown reminder is injected at plan-time describing the renderer's extensions (code-file links, callouts, tables, diagrams, task lists, hex swatches, wiki-links). Lets the planning agent enrich plans with PFM features without having to discover them. Composes cleanly with the compound-skill improvement hook. Supported across all three runtimes: Claude Code (`improve-context` PreToolUse hook in `apps/hook/server/index.ts`), OpenCode (`experimental.chat.system.transform` in `apps/opencode-plugin/index.ts`), and Pi (`before_agent_start` in `apps/pi-extension/index.ts`).
+
 **Legacy:** `SSH_TTY` and `SSH_CONNECTION` are still detected when `PLANNOTATOR_REMOTE` is unset. Set `PLANNOTATOR_REMOTE=1` / `true` to force remote mode or `0` / `false` to force local mode.
 
 **Devcontainer/SSH usage:**
@@ -142,7 +163,7 @@ User runs /plannotator-review command
 Claude Code: plannotator review subcommand runs
 OpenCode: event handler intercepts command
         ↓
-git diff captures unstaged changes
+VCS diff captures local changes (git diff or jj diff)
         ↓
 Review server starts, opens browser with diff viewer
         ↓
@@ -162,7 +183,7 @@ OpenCode/Pi: event handler intercepts command
         ↓
 Input type detected:
   .md/.mdx   → file read from disk
-  .html/.htm → file read, converted to markdown via Turndown
+  .html/.htm → file read, converted to markdown via Turndown (or rendered as-is with --render-html)
   https://   → fetched via Jina Reader (default) or fetch+Turndown (--no-jina)
   folder/    → file browser opened, files converted on demand
         ↓
@@ -210,6 +231,7 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/reference/obsidian/doc`   | GET | Read a vault markdown file (`?vaultPath=<path>&path=<file>`) |
 | `/api/plan/vscode-diff` | POST   | Open diff in VS Code (body: baseVersion)   |
 | `/api/doc`              | GET    | Serve linked .md/.mdx file (`?path=<path>`) |
+| `/api/doc/exists`       | POST   | Batch-validate code-file paths (body: `{ paths: string[], base?: string }`) returns `{ results: { [path]: { status: "found"\|"ambiguous"\|"missing"\|"unavailable", … } } }` |
 | `/api/draft`          | GET/POST/DELETE | Auto-save annotation drafts to survive server crashes |
 | `/api/editor-annotations` | GET | List editor annotations (VS Code only) |
 | `/api/editor-annotation` | POST/DELETE | Add or remove an editor annotation (VS Code only) |
@@ -223,8 +245,9 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 
 | Endpoint              | Method | Purpose                                    |
 | --------------------- | ------ | ------------------------------------------ |
-| `/api/diff`           | GET    | Returns `{ rawPatch, gitRef, origin, diffType, gitContext }` |
-| `/api/file-content`   | GET    | Returns `{ oldContent, newContent }` for expandable diff context |
+| `/api/diff`           | GET    | Returns `{ rawPatch, gitRef, origin, diffType, base, hideWhitespace, gitContext }` |
+| `/api/diff/switch`    | POST   | Switch diff type, base branch, or whitespace mode (body: `{ diffType, base?, hideWhitespace? }`) |
+| `/api/file-content`   | GET    | Returns `{ oldContent, newContent }` for expandable diff context (`?path=&oldPath=&base=`) |
 | `/api/git-add`        | POST   | Stage/unstage a file (body: `{ filePath, undo? }`) |
 | `/api/feedback`       | POST   | Submit review (body: feedback, annotations, agentSwitch) |
 | `/api/image`          | GET    | Serve image by path query param            |
@@ -249,17 +272,26 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/agents/jobs` | POST | Launch an agent job (body: `{ provider, command, label }`) |
 | `/api/agents/jobs` | DELETE | Kill all running agent jobs |
 | `/api/agents/jobs/:id` | DELETE | Kill a specific agent job |
+| `/api/pr-diff-scope` | POST | Switch between layer and full-stack diff scope |
+| `/api/pr-list` | GET | List PRs for the current repo (cached 30s) |
+| `/api/pr-switch` | POST | Switch to a different PR in-place (body: `{ url }`) |
 | `/api/tour/:jobId` | GET | Fetch Code Tour result (greeting, stops, checklist) for a completed tour job |
 | `/api/tour/:jobId/checklist` | PUT | Persist checklist item state for a Code Tour |
+| `/api/code-nav/resolve` | POST | Search for symbol definitions and references via ripgrep (body: `{ symbol, filePath, line, charStart, side, language? }`) |
+| `/api/code-nav/file` | GET | Read file from working tree for code-nav preview (`?path=`) |
 
 ### Annotate Server (`packages/server/annotate.ts`)
 
 | Endpoint              | Method | Purpose                                    |
 | --------------------- | ------ | ------------------------------------------ |
-| `/api/plan`           | GET    | Returns `{ plan, origin, mode: "annotate", filePath, sourceInfo? }` |
+| `/api/plan`           | GET    | Returns `{ plan, origin, mode: "annotate", filePath, sourceInfo?, gate, renderAs?, rawHtml? }` |
 | `/api/feedback`       | POST   | Submit annotations (body: feedback, annotations) |
+| `/api/approve`        | POST   | Approve without feedback (review-gate UX, `--gate`) |
+| `/api/exit`           | POST   | Close session without feedback |
 | `/api/image`          | GET    | Serve image by path query param            |
 | `/api/upload`         | POST   | Upload image, returns `{ path, originalName }` |
+| `/api/doc`            | GET    | Serve linked .md/.mdx/.html file or code file (`?path=<path>&base=<dir>`) |
+| `/api/doc/exists`     | POST   | Batch-validate code-file paths (body: `{ paths: string[], base?: string }`) |
 | `/api/draft`          | GET/POST/DELETE | Auto-save annotation drafts to survive server crashes |
 | `/api/external-annotations/stream` | GET | SSE stream for real-time external annotations |
 | `/api/external-annotations` | GET | Snapshot of external annotations (polling fallback, `?since=N` for version gating) |
@@ -374,6 +406,20 @@ interface Block {
 
 Text highlighting uses `web-highlighter` library. Code blocks use manual `<mark>` wrapping (web-highlighter can't select inside `<pre>`).
 
+## Keyboard Shortcuts
+
+**Location:** `packages/ui/shortcuts/` (engine + scope data), `packages/editor/shortcuts.ts` and `packages/review-editor/shortcuts.ts` (per-app surfaces).
+
+The shortcut system has three layers:
+
+1. **Engine** (`packages/ui/shortcuts/{core,runtime}.ts`) — parser for declarative bindings (`Mod+Enter`, `Alt Alt` double-tap, `Alt hold`), dispatcher, platform-aware formatter (mac glyphs vs. `Ctrl`), validator, and the `useShortcutScope` / `useDoubleTapShortcuts` React hooks. Truly shared — both apps use it as-is.
+2. **Scopes** — `defineShortcutScope({ id, title, shortcuts: { actionId: { bindings, description, section, ... } } })`. One scope per UI surface (annotation toolbar, comment popover, file tree, etc.). Lives in `packages/ui/shortcuts/{plan-review,code-review}/` — **the subfolder names which app's UI the scope serves**. Components/Apps wire handlers to a scope via `useShortcutScope({ scope, handlers: { actionId: () => ... } })`.
+3. **Surfaces** (`packages/editor/shortcuts.ts`, `packages/review-editor/shortcuts.ts`) — each app composes its scopes into a `ShortcutSurface` (`planReviewSurface`, `annotateSurface`, `codeReviewSurface`). Surfaces feed both the in-app help modal and the marketing site's auto-generated docs page.
+
+**Convention for adding new shortcuts:** define the action in the relevant scope file under the right subfolder (`plan-review/` or `code-review/`), declare the binding(s) and description, then wire a handler at the call site with `useShortcutScope`. The marketing docs page picks it up automatically at next build. Unit tests in `packages/ui/shortcuts.test.ts` enforce normalized binding tokens (`Mod`, `Shift`, `Alt`, `A-Z`, `1-0`, named keys, `F1`–`F12`) and unique scope ids.
+
+**Marketing docs auto-generation:** `apps/marketing/src/lib/shortcutReference.ts` reads the three surfaces and `apps/marketing/src/components/ShortcutReference.astro` renders them as tables. The `/docs/reference/keyboard-shortcuts` page is special-cased in `apps/marketing/src/pages/docs/[...slug].astro` to render the component instead of the markdown body.
+
 ## URL Sharing
 
 **Location:** `packages/ui/utils/sharing.ts`, `packages/ui/hooks/useSharing.ts`
@@ -391,6 +437,9 @@ interface SharePayload {
   a: ShareableAnnotation[]; // Compact annotations
   g?: ShareableImage[]; // Global attachments
   d?: (string | null)[]; // diffContext per annotation, parallel to `a`
+  s?: (string | undefined)[]; // source per annotation (external tool identifier), parallel to `a`
+  h?: string; // Raw HTML content (--render-html mode)
+  r?: 'html'; // Render mode flag (omitted = markdown)
 }
 
 type ShareableAnnotation =
@@ -455,6 +504,8 @@ bun run package:vscode   # Package .vsix for marketplace
 bun run build            # Build hook + opencode (main targets)
 ```
 
+**Important: Tailwind `@source` paths.** When creating new directories that contain `.tsx` files with Tailwind classes, add a matching `@source` entry to the app's `index.css`. Tailwind only generates CSS for classes it finds in scanned files — missing paths means classes appear in the DOM but have no effect.
+
 **Important: Build order matters.** The hook build (`build:hook`) copies pre-built HTML from `apps/review/dist/`. If you change UI code in `packages/ui/`, `packages/editor/`, or `packages/review-editor/`, you **must** rebuild the review app first, then the hook:
 
 ```bash
@@ -477,6 +528,8 @@ Running only `build:opencode` will copy stale HTML files.
 ## Marketing Site
 
 `apps/marketing/` is the plannotator.ai website — landing page, documentation, and blog. Built with Astro 5 (static output, zero client JS except a theme toggle island). Docs are markdown files in `src/content/docs/`, blog posts in `src/content/blog/`, both using Astro content collections. Tailwind CSS v4 via `@tailwindcss/vite`. Deploys to S3/CloudFront via GitHub Actions on push to main.
+
+The `/docs/reference/keyboard-shortcuts` page is auto-generated from the shortcut registry at build time — see the Keyboard Shortcuts section above. Editing the markdown body has no effect; update the scope files instead.
 
 ## Test plugin locally
 

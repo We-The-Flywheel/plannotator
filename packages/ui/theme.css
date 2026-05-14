@@ -25,6 +25,31 @@
 @import "./themes/cursor.css";
 @import "./themes/cursor-hc.css";
 @import "./themes/cursor-midnight.css";
+@import "./themes/everforest.css";
+@import "./themes/everforest-hard.css";
+@import "./themes/everforest-soft.css";
+@import "./themes/nord.css";
+@import "./themes/solarized.css";
+@import "./themes/github.css";
+@import "./themes/one-dark-pro.css";
+@import "./themes/night-owl.css";
+@import "./themes/ayu-dark.css";
+@import "./themes/poimandres.css";
+@import "./themes/material.css";
+@import "./themes/vitesse.css";
+@import "./themes/vesper.css";
+@import "./themes/andromeeda.css";
+@import "./themes/aurora-x.css";
+@import "./themes/dark-plus.css";
+@import "./themes/houston.css";
+@import "./themes/laserwave.css";
+@import "./themes/min.css";
+@import "./themes/one-light.css";
+@import "./themes/plastic.css";
+@import "./themes/red.css";
+@import "./themes/slack.css";
+@import "./themes/snazzy-light.css";
+@import "./themes/vitesse-black.css";
 @import "./print.css";
 
 /* Tailwind bridge — maps CSS vars to utility classes */
@@ -166,6 +191,15 @@ body {
   background: oklch(from var(--primary) l c h / 0.3);
 }
 
+/* Suppress all color transitions until the app has mounted and the theme
+   is stable. Without this, the global * transition below fires on initial
+   load — className reassignments during React mount trigger a 150ms
+   transition from browser-default black to themed white, causing a visible
+   flash. ThemeProvider adds .transitions-ready after mount. */
+html:not(.transitions-ready) * {
+  transition-duration: 0s !important;
+}
+
 /* Smooth transitions for theme switching and hover states.
    Only color properties — transform/opacity are handled per-component
    to avoid interfering with scroll compositing. */
@@ -194,6 +228,7 @@ body {
   65% { background: transparent; }
   100% { background: transparent; }
 }
+
 
 /* Word-level diff markers inside modified plan-diff blocks. Emitted as
    <ins>/<del> by PlanCleanDiffView's inline renderer; keep the decoration

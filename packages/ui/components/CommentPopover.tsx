@@ -7,7 +7,9 @@ import { useDraggable } from '../hooks/useDraggable';
 
 interface CommentPopoverProps {
   /** Element to anchor the popover near (re-reads position on scroll) */
-  anchorEl: HTMLElement;
+  anchorEl?: HTMLElement;
+  /** Static viewport rect to anchor near when no stable DOM element exists */
+  anchorRect?: DOMRect;
   /** Truncated selected text shown in header, or empty for global */
   contextText: string;
   /** Whether this is a global comment */
@@ -18,10 +20,27 @@ interface CommentPopoverProps {
   onSubmit: (text: string, images?: ImageAttachment[]) => void;
   /** Called when popover is closed/cancelled */
   onClose: () => void;
+  /** Opt-in: persist text + images across close/reopen, keyed by this string. Cleared on submit. */
+  draftKey?: string;
 }
 
 const MAX_POPOVER_WIDTH = 384;
 const GAP = 8;
+
+// Module-level draft store: survives popover unmount so reopening the same key restores in-progress text.
+const draftStore = new Map<string, { text: string; images: ImageAttachment[] }>();
+
+/** Mirrors the latest text + images into `draftStore[draftKey]` so they outlive popover unmount. No-op without a key. */
+function useCommentDraftSync(draftKey: string | undefined, text: string, images: ImageAttachment[]) {
+  useEffect(() => {
+    if (!draftKey) return;
+    if (text.trim() || images.length > 0) {
+      draftStore.set(draftKey, { text, images });
+    } else {
+      draftStore.delete(draftKey);
+    }
+  }, [draftKey, text, images]);
+}
 
 function computePosition(anchorRect: DOMRect): { top: number; left: number; flipAbove: boolean; width: number } {
   const spaceBelow = window.innerHeight - anchorRect.bottom;
@@ -40,22 +59,27 @@ function computePosition(anchorRect: DOMRect): { top: number; left: number; flip
 
 export const CommentPopover: React.FC<CommentPopoverProps> = ({
   anchorEl,
+  anchorRect,
   contextText,
   isGlobal,
   initialText = '',
   onSubmit,
   onClose,
+  draftKey,
 }) => {
   const [mode, setMode] = useState<'popover' | 'dialog'>('popover');
-  const [text, setText] = useState(initialText);
-  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const initialDraft = draftKey ? draftStore.get(draftKey) : undefined;
+  const [text, setText] = useState(initialDraft?.text ?? initialText);
+  const [images, setImages] = useState<ImageAttachment[]>(initialDraft?.images ?? []);
   const [position, setPosition] = useState<{ top: number; left: number; flipAbove: boolean; width: number } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const { dragPosition, dragHandleProps, wasDragged, reset: resetDrag } = useDraggable(popoverRef);
 
+  useCommentDraftSync(draftKey, text, images);
+
   // Reset drag when anchor changes (new annotation) or mode switches
-  useEffect(() => { resetDrag(); }, [anchorEl, resetDrag]);
+  useEffect(() => { resetDrag(); }, [anchorEl, anchorRect, resetDrag]);
   useEffect(() => { if (mode === 'popover') resetDrag(); }, [mode, resetDrag]);
 
   // Track anchor position on scroll/resize (popover mode only, not after user drag)
@@ -63,7 +87,8 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     if (mode !== 'popover' || wasDragged) return;
 
     const update = () => {
-      setPosition(computePosition(anchorEl.getBoundingClientRect()));
+      const rect = anchorEl?.getBoundingClientRect() ?? anchorRect;
+      if (rect) setPosition(computePosition(rect));
     };
 
     update();
@@ -73,7 +98,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
       window.removeEventListener('scroll', update, true);
       window.removeEventListener('resize', update);
     };
-  }, [anchorEl, mode, wasDragged]);
+  }, [anchorEl, anchorRect, mode, wasDragged]);
 
   // Focus textarea on mount and mode changes
   useEffect(() => {
@@ -107,9 +132,10 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
 
   const handleSubmit = useCallback(() => {
     if (text.trim() || images.length > 0) {
+      if (draftKey) draftStore.delete(draftKey);
       onSubmit(text, images.length > 0 ? images : undefined);
     }
-  }, [text, images, onSubmit]);
+  }, [text, images, onSubmit, draftKey]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Escape') {

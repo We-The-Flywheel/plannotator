@@ -17,18 +17,20 @@ import { listenOnPort } from "./network.js";
 import { getRepoInfo } from "./project.js";
 import {
 	handleDocRequest,
+	handleDocExistsRequest,
 	handleFileBrowserRequest,
 	handleObsidianVaultsRequest,
 	handleObsidianFilesRequest,
 	handleObsidianDocRequest,
 } from "./reference.js";
+import { warmFileListCache } from "../generated/resolve-file.js";
 import { createExternalAnnotationHandler } from "./external-annotations.js";
 
 export interface AnnotateServerResult {
 	port: number;
 	portSource: "env" | "remote-default" | "random";
 	url: string;
-	waitForDecision: () => Promise<{ feedback: string; annotations: unknown[]; exit?: boolean }>;
+	waitForDecision: () => Promise<{ feedback: string; annotations: unknown[]; exit?: boolean; approved?: boolean }>;
 	stop: () => void;
 }
 
@@ -43,7 +45,13 @@ export async function startAnnotateServer(options: {
 	shareBaseUrl?: string;
 	pasteApiUrl?: string;
 	sourceInfo?: string;
+	sourceConverted?: boolean;
+	gate?: boolean;
+	rawHtml?: string;
+	renderHtml?: boolean;
 }): Promise<AnnotateServerResult> {
+	// Side-channel pre-warm so /api/doc/exists POSTs land on warm cache.
+	void warmFileListCache(process.cwd(), "code");
 	const gitUser = detectGitUser();
 	const sharingEnabled =
 		options.sharingEnabled ?? process.env.PLANNOTATOR_SHARE !== "disabled";
@@ -56,17 +64,23 @@ export async function startAnnotateServer(options: {
 		feedback: string;
 		annotations: unknown[];
 		exit?: boolean;
+		approved?: boolean;
 	}) => void;
 	const decisionPromise = new Promise<{
 		feedback: string;
 		annotations: unknown[];
 		exit?: boolean;
+		approved?: boolean;
 	}>((r) => {
 		resolveDecision = r;
 	});
 
-	// Draft key for annotation persistence
-	const draftKey = contentHash(options.markdown);
+	// Folder annotation has no stable markdown body, so key drafts by folder path instead.
+	const draftSource =
+		options.mode === "annotate-folder" && options.folderPath
+			? `folder:${resolvePath(options.folderPath)}`
+			: options.renderHtml && options.rawHtml ? options.rawHtml : options.markdown;
+	const draftKey = contentHash(draftSource);
 
 	// Detect repo info (cached for this session)
 	const repoInfo = getRepoInfo();
@@ -85,6 +99,10 @@ export async function startAnnotateServer(options: {
 				mode: options.mode || "annotate",
 				filePath: options.filePath,
 				sourceInfo: options.sourceInfo,
+				sourceConverted: options.sourceConverted ?? false,
+				gate: options.gate ?? false,
+				renderAs: options.renderHtml && options.rawHtml ? 'html' : 'markdown',
+				...(options.renderHtml && options.rawHtml ? { rawHtml: options.rawHtml } : {}),
 				sharingEnabled,
 				shareBaseUrl,
 				pasteApiUrl,
@@ -116,7 +134,9 @@ export async function startAnnotateServer(options: {
 			if (!url.searchParams.has("base") && options.filePath && !/^https?:\/\//i.test(options.filePath)) {
 				url.searchParams.set("base", dirname(resolvePath(options.filePath)));
 			}
-			handleDocRequest(res, url);
+			await handleDocRequest(res, url);
+		} else if (url.pathname === "/api/doc/exists" && req.method === "POST") {
+			await handleDocExistsRequest(res, req);
 		} else if (url.pathname === "/api/obsidian/vaults") {
 			handleObsidianVaultsRequest(res);
 		} else if (url.pathname === "/api/reference/obsidian/files" && req.method === "GET") {
@@ -130,6 +150,10 @@ export async function startAnnotateServer(options: {
 		} else if (url.pathname === "/api/exit" && req.method === "POST") {
 			deleteDraft(draftKey);
 			resolveDecision({ feedback: "", annotations: [], exit: true });
+			json(res, { ok: true });
+		} else if (url.pathname === "/api/approve" && req.method === "POST") {
+			deleteDraft(draftKey);
+			resolveDecision({ feedback: "", annotations: [], approved: true });
 			json(res, { ok: true });
 		} else if (url.pathname === "/api/feedback" && req.method === "POST") {
 			try {

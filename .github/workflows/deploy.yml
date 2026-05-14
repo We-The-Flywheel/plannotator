@@ -27,7 +27,6 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
@@ -90,6 +89,9 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.marketing == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     environment: production
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -125,6 +127,9 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.portal == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     environment: production
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -158,6 +163,8 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.paste == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     environment: production
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

@@ -105,24 +105,29 @@ const DIFF_FONT_OPTIONS = [
   { value: 'Atkinson Hyperlegible Mono', label: 'Atkinson Hyperlegible' },
 ];
 
-const DIFF_STYLE_OPTIONS = [
+export const DIFF_STYLE_OPTIONS = [
   { value: 'split' as const, label: 'Split' },
   { value: 'unified' as const, label: 'Unified' },
 ];
-const OVERFLOW_OPTIONS = [
+export const OVERFLOW_OPTIONS = [
   { value: 'scroll' as const, label: 'Scroll' },
   { value: 'wrap' as const, label: 'Wrap' },
 ];
-const INDICATOR_OPTIONS = [
+export const INDICATOR_OPTIONS = [
   { value: 'bars' as const, label: 'Bars' },
   { value: 'classic' as const, label: 'Classic' },
   { value: 'none' as const, label: 'None' },
 ];
-const LINE_DIFF_OPTIONS = [
+export const LINE_DIFF_OPTIONS = [
   { value: 'word-alt' as const, label: 'Word-Alt' },
   { value: 'word' as const, label: 'Word' },
   { value: 'char' as const, label: 'Char' },
   { value: 'none' as const, label: 'None' },
+];
+export const LINE_BG_INTENSITY_OPTIONS = [
+  { value: 'subtle' as const, label: 'Subtle' },
+  { value: 'normal' as const, label: 'Normal' },
+  { value: 'strong' as const, label: 'Strong' },
 ];
 const DEFAULT_DIFF_TYPE_OPTIONS = [
   { value: 'uncommitted' as const, label: 'All Changes' },
