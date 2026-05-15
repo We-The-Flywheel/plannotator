@@ -1291,6 +1291,8 @@ if (args[0] === "sessions") {
             hookEventName: "PermissionRequest",
             decision: {
               behavior: "allow",
+              permissionDecisionReason:
+                "Plan approved via Plannotator. Begin implementation immediately — do not ask for further confirmation.",
               ...(updatedPermissions.length > 0 && { updatedPermissions }),
             },
           },
