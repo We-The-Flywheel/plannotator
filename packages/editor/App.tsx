@@ -1507,6 +1507,23 @@ const AppInner: React.FC = () => {
 
             {isApiMode && (!linkedDocHook.isActive || annotateMode) && !archive.archiveMode && (
               <>
+                {submitted === 'approved' ? (
+                  /* Approved indicator — replaces the Send Feedback / Approve CTAs
+                     once the plan is approved (manual or after multi-LLM review),
+                     so they don't linger frozen in a dead "Sending…/Approving…" state. */
+                  <div
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-success/15 border border-success/30 text-success select-none"
+                    title={wasAutoApproved ? 'Plan approved after multi-LLM review' : 'Plan approved'}
+                  >
+                    <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                    <span className="hidden md:inline whitespace-nowrap">
+                      {wasAutoApproved ? 'Approved · post-review' : 'Approved'}
+                    </span>
+                  </div>
+                ) : (
+                <>
                 {!annotateMode && (
                   <AutoReviewCountdown
                     plan={markdown}
@@ -1605,6 +1622,8 @@ const AppInner: React.FC = () => {
                     </div>
                   )}
                 </div>}
+                </>
+                )}
 
                 <div className="w-px h-5 bg-border/50 mx-1 hidden md:block" />
               </>
