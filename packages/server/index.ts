@@ -57,6 +57,7 @@ import { createExecutionWatch } from "./execution-watch";
 import { scanPlanAgainstClaudeMd, violationToAnnotationInput } from "./claude-md-rules";
 import { addWaiver, removeWaiver, loadWaivers } from "./claude-md-waivers";
 import { runRedTeamReview, runRedTeamReviewStreaming } from "./red-team-review";
+import { createCouncilRunManager } from "./multi-llm-run";
 import { evaluatePolicy } from "./policies";
 import { findSimilarPastPlans, similarPlanToAnnotationInput } from "./archive-similarity";
 import { isWSL } from "./browser";
@@ -196,6 +197,8 @@ export async function startPlannotatorServer(
   // Inert until `start(sinceMs)` is called from the approve handler.
   const executionWatch = mode !== "archive" ? createExecutionWatch(process.cwd()) : null;
   const aiRuntime = mode !== "archive" ? await createAIRuntime() : null;
+  // Multi-LLM review runs — server-owned so the UI can reconnect mid-run.
+  const councilRuns = createCouncilRunManager();
   const slug = mode !== "archive" ? generateSlug(plan) : "";
 
   // CLAUDE.md-aware static review: scan the plan against project + global
@@ -553,117 +556,137 @@ export async function startPlannotatorServer(
           }
 
           // --- Multi-LLM Review Endpoints ---
+          //
+          // Job model: POST /start launches (or attaches to) a server-owned
+          // council.py run whose events are buffered in memory; GET /stream
+          // replays from `since` then goes live, so a dropped connection can
+          // reconnect without losing the run. GET /snapshot is the polling
+          // fallback. The legacy POST /api/multi-llm-review-stream is kept as
+          // a start-or-attach + stream-from-0 alias.
 
-          // API: Multi-LLM review (streaming SSE)
-          if (url.pathname === "/api/multi-llm-review-stream" && req.method === "POST") {
+          /** Replay buffered council events from `since`, then follow live. */
+          const streamCouncilRun = (runId: string, since: number): Response => {
+            server.timeout(req, 0);
+            const encoder = new TextEncoder();
+            const stream = new ReadableStream({
+              async start(controller) {
+                const emit = (data: string) => {
+                  controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+                };
+                // Heartbeat keeps the SSE connection alive during long model calls
+                const heartbeat = setInterval(() => {
+                  try { controller.enqueue(encoder.encode(": heartbeat\n\n")); } catch {}
+                }, 5_000);
+                try {
+                  let cursor = Math.max(0, since);
+                  while (true) {
+                    const current = councilRuns.run;
+                    // Run replaced or gone — tell the client instead of hanging.
+                    if (!current || current.id !== runId) {
+                      emit(JSON.stringify({ event: "error", message: "Review run no longer available" }));
+                      break;
+                    }
+                    while (cursor < current.events.length) {
+                      emit(current.events[cursor++]);
+                    }
+                    if (current.status !== "running") break;
+                    await councilRuns.waitForChange(cursor, 15_000);
+                  }
+                } catch {
+                  // Client disconnected mid-write — the run keeps going; they can re-attach.
+                } finally {
+                  clearInterval(heartbeat);
+                  try { controller.close(); } catch {}
+                }
+              },
+            });
+            return new Response(stream, {
+              headers: {
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+              },
+            });
+          };
+
+          // API: Start (or attach to) a multi-LLM review run
+          if (url.pathname === "/api/multi-llm-review/start" && req.method === "POST") {
             try {
-              // Guard: skip if council.py is already running (e.g. triggered via shell skill)
-              const pgrep = Bun.spawn(["pgrep", "-f", "council\\.py"], { stdout: "pipe", stderr: "pipe" });
-              const pgrepOut = await new Response(pgrep.stdout).text();
-              await pgrep.exited;
-              if (pgrepOut.trim()) {
+              const existing = councilRuns.run;
+              if (existing?.status === "running") {
+                return Response.json({ runId: existing.id, alreadyRunning: true });
+              }
+              // Guard: a council.py we didn't start (e.g. via shell skill) can't be attached to
+              if (await councilRuns.isForeignCouncilRunning()) {
                 return Response.json(
                   { error: "Multi-LLM review already in progress (council.py running)" },
                   { status: 409 },
                 );
               }
-
               const body = (await req.json()) as { plan?: string; question?: string };
               const planText = body.plan || plan;
               const question = body.question || `Review this implementation plan and provide feedback on completeness, risks, and improvements:\n${planText}`;
-
-              const councilPaths = [
-                resolve(import.meta.dir, "../../../../skills/multi-llm-deliberation/council.py"),
-                resolve(process.env.HOME || homedir(), "opt/agentic-coding/skills/multi-llm-deliberation/council.py"),
-              ];
-              let councilPath: string | null = null;
-              for (const p of councilPaths) {
-                if (await Bun.file(p).exists()) { councilPath = p; break; }
-              }
+              const councilPath = await councilRuns.findCouncilPath();
               if (!councilPath) {
                 return Response.json({ error: "council.py not found." }, { status: 404 });
               }
+              const run = councilRuns.start(question, councilPath);
+              return Response.json({ runId: run.id });
+            } catch (err) {
+              const message = err instanceof Error ? err.message : "Failed to start review";
+              return Response.json({ error: message }, { status: 500 });
+            }
+          }
 
-              const proc = Bun.spawn(["python3", councilPath, "--json", question], {
-                stdout: "pipe",
-                stderr: "pipe",
-                env: { ...process.env },
-              });
+          // API: Attach to a review run's event stream (SSE, resumable via ?since=N)
+          if (url.pathname === "/api/multi-llm-review/stream" && req.method === "GET") {
+            const runId = url.searchParams.get("runId");
+            const since = parseInt(url.searchParams.get("since") || "0", 10) || 0;
+            const run = councilRuns.run;
+            if (!run || (runId && run.id !== runId)) {
+              return Response.json({ error: "No such review run" }, { status: 404 });
+            }
+            return streamCouncilRun(run.id, since);
+          }
 
-              const stdoutPromise = new Response(proc.stdout).text();
-              const encoder = new TextEncoder();
-              const decoder = new TextDecoder();
+          // API: Snapshot of a review run's events (polling fallback, ?since=N)
+          if (url.pathname === "/api/multi-llm-review/snapshot" && req.method === "GET") {
+            const runId = url.searchParams.get("runId");
+            const since = parseInt(url.searchParams.get("since") || "0", 10) || 0;
+            const run = councilRuns.run;
+            if (!run || (runId && run.id !== runId)) {
+              return Response.json({ error: "No such review run" }, { status: 404 });
+            }
+            return Response.json({
+              runId: run.id,
+              status: run.status,
+              events: run.events.slice(Math.max(0, since)).map((e) => JSON.parse(e)),
+              nextIndex: run.events.length,
+            });
+          }
 
-              const stream = new ReadableStream({
-                async start(controller) {
-                  /** Emit a single SSE event with proper double-newline termination. */
-                  const emit = (data: string) => {
-                    controller.enqueue(encoder.encode(`data: ${data}\n\n`));
-                  };
-
-                  // Heartbeat keeps the SSE connection alive during long model calls
-                  const heartbeat = setInterval(() => {
-                    try { controller.enqueue(encoder.encode(": heartbeat\n\n")); } catch {}
-                  }, 5_000);
-
-                  try {
-                    // Stream progress events from council.py stderr
-                    const reader = (proc.stderr as ReadableStream).getReader();
-                    let buffer = "";
-                    try {
-                      while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-                        buffer += decoder.decode(value, { stream: true });
-                        const lines = buffer.split("\n");
-                        buffer = lines.pop() || "";
-                        for (const line of lines) {
-                          const trimmed = line.trim();
-                          if (!trimmed) continue;
-                          try {
-                            JSON.parse(trimmed);
-                            emit(trimmed);
-                          } catch {
-                            emit(JSON.stringify({ event: "log", message: trimmed }));
-                          }
-                        }
-                      }
-                      if (buffer.trim()) {
-                        emit(JSON.stringify({ event: "log", message: buffer.trim() }));
-                      }
-                    } catch { /* reader error */ }
-
-                    // Process final result from stdout
-                    const stdout = await stdoutPromise;
-                    const exitCode = await proc.exited;
-
-                    if (exitCode !== 0) {
-                      emit(JSON.stringify({ event: "error", message: `Deliberation failed (exit ${exitCode})` }));
-                    } else {
-                      try {
-                        const structured = JSON.parse(stdout);
-                        emit(JSON.stringify({ event: "result", ok: true, result: structured.consensus, structured }));
-                      } catch {
-                        emit(JSON.stringify({ event: "result", ok: true, result: stdout }));
-                      }
-                    }
-                  } finally {
-                    clearInterval(heartbeat);
-                    controller.close();
-                  }
-                },
-              });
-
-              // Disable Bun's idle timeout for this SSE connection — council.py can take several minutes
-              server.timeout(req, 0);
-
-              return new Response(stream, {
-                headers: {
-                  "Content-Type": "text/event-stream; charset=utf-8",
-                  "Cache-Control": "no-cache",
-                  "Connection": "keep-alive",
-                },
-              });
+          // API: Multi-LLM review (legacy streaming SSE — start-or-attach, stream from 0)
+          if (url.pathname === "/api/multi-llm-review-stream" && req.method === "POST") {
+            try {
+              const existing = councilRuns.run;
+              if (existing?.status === "running") {
+                return streamCouncilRun(existing.id, 0);
+              }
+              if (await councilRuns.isForeignCouncilRunning()) {
+                return Response.json(
+                  { error: "Multi-LLM review already in progress (council.py running)" },
+                  { status: 409 },
+                );
+              }
+              const body = (await req.json()) as { plan?: string; question?: string };
+              const planText = body.plan || plan;
+              const question = body.question || `Review this implementation plan and provide feedback on completeness, risks, and improvements:\n${planText}`;
+              const councilPath = await councilRuns.findCouncilPath();
+              if (!councilPath) {
+                return Response.json({ error: "council.py not found." }, { status: 404 });
+              }
+              const run = councilRuns.start(question, councilPath);
+              return streamCouncilRun(run.id, 0);
             } catch (err) {
               const message = err instanceof Error ? err.message : "Streaming review failed";
               return Response.json({ error: message }, { status: 500 });

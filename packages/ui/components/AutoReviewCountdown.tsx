@@ -225,72 +225,141 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
     const controller = new AbortController();
     abortRef.current = controller;
 
+    // A council error event is final — the run failed server-side, so
+    // reconnecting won't help. Network failures, by contrast, are retried:
+    // the run keeps going server-side and we re-attach from the last event.
+    class DeliberationFailed extends Error {}
+
+    /** Handle one SSE data payload. Returns true when the run is complete. */
+    const handleEvent = (evt: any): boolean => {
+      if (evt.event === 'log') {
+        actions.appendLogRaw(evt.message || '');
+      } else if (evt.event === 'error') {
+        throw new DeliberationFailed(evt.message || 'Deliberation failed');
+      } else if (evt.event === 'result') {
+        consensusRef.current =
+          typeof evt.result === 'string'
+            ? evt.result
+            : JSON.stringify(evt.structured || evt.result);
+        if (evt.structured) structuredRef.current = evt.structured;
+        actions.setConsensus(consensusRef.current);
+        return true;
+      } else {
+        // Council.py structured events (stage_start, model_done, stage_done)
+        const logMsg = councilEventToLog(evt);
+        if (logMsg) actions.appendLogRaw(logMsg);
+      }
+      return false;
+    };
+
     try {
-      const res = await fetch('/api/multi-llm-review-stream', {
+      // Start (or attach to) the server-owned review run.
+      const startRes = await fetch('/api/multi-llm-review/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plan: planRef.current }),
         signal: controller.signal,
       });
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-        if (res.status === 409) {
-          // council.py already running (e.g. triggered via shell) — silently stop
+      if (!startRes.ok) {
+        const err = await startRes.json().catch(() => ({ error: `HTTP ${startRes.status}` }));
+        if (startRes.status === 409) {
+          // council.py launched outside the server (e.g. via shell) — can't attach
           actions.appendLog({ ts: Date.now(), level: 'info', text: 'Skipped — review already running in shell' });
           actions.setPhase('idle');
           actions.closeDrawer();
           return;
         }
-        throw new Error(err.error || `HTTP ${res.status}`);
+        throw new Error(err.error || `HTTP ${startRes.status}`);
       }
 
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      const { runId, alreadyRunning } = (await startRes.json()) as { runId: string; alreadyRunning?: boolean };
+      if (alreadyRunning) {
+        actions.appendLog({ ts: Date.now(), level: 'info', text: 'Attached to review already in progress' });
+      }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      // Stream events with reconnect: on a mid-stream network failure the
+      // run keeps going server-side, so re-attach from the last seen event
+      // index with exponential backoff instead of giving up.
+      const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+      let eventIndex = 0;
+      let gotResult = false;
+      let attempt = 0;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          try {
-            const evt = JSON.parse(line.slice(6));
-            if (evt.event === 'log') {
-              actions.appendLogRaw(evt.message || '');
-            } else if (evt.event === 'error') {
-              throw new Error(evt.message || 'Deliberation failed');
-            } else if (evt.event === 'result') {
-              consensusRef.current =
-                typeof evt.result === 'string'
-                  ? evt.result
-                  : JSON.stringify(evt.structured || evt.result);
-              if (evt.structured) structuredRef.current = evt.structured;
-              actions.setConsensus(consensusRef.current);
-            } else {
-              // Council.py structured events (stage_start, model_done, stage_done)
-              const logMsg = councilEventToLog(evt);
-              if (logMsg) actions.appendLogRaw(logMsg);
-            }
-          } catch (e) {
-            if (e instanceof SyntaxError) continue; // Skip malformed SSE
-            throw e;
+      while (!gotResult) {
+        try {
+          const res = await fetch(
+            `/api/multi-llm-review/stream?runId=${encodeURIComponent(runId)}&since=${eventIndex}`,
+            { signal: controller.signal },
+          );
+          if (res.status === 404) {
+            // Run evicted (server restarted or a new run replaced it) — final.
+            throw new DeliberationFailed('Review run no longer available — server may have restarted.');
           }
-        }
-      }
+          if (!res.ok || !res.body) {
+            throw new Error(`HTTP ${res.status}`);
+          }
+          attempt = 0; // connection established — reset backoff
 
-      if (!consensusRef.current) {
-        throw new Error('No result received from deliberation');
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              let evt: any;
+              try {
+                evt = JSON.parse(line.slice(6));
+              } catch {
+                continue; // Skip malformed SSE
+              }
+              eventIndex++;
+              if (handleEvent(evt)) gotResult = true;
+            }
+          }
+
+          if (!gotResult) {
+            // Stream ended without a result: terminal error already threw via
+            // handleEvent; a clean close without result means the run ended
+            // abnormally server-side.
+            throw new DeliberationFailed('No result received from deliberation');
+          }
+        } catch (err: any) {
+          if (err?.name === 'AbortError' || err instanceof DeliberationFailed) throw err;
+          // Network-level failure — retry with backoff, resuming from eventIndex.
+          if (attempt >= RETRY_DELAYS_MS.length) {
+            throw new Error(
+              `Connection to review stream lost after ${RETRY_DELAYS_MS.length} reconnect attempts — ` +
+              'the review may still be running server-side. Try Retry once the network recovers.',
+            );
+          }
+          const delay = RETRY_DELAYS_MS[attempt++];
+          actions.appendLog({
+            ts: Date.now(),
+            level: 'info',
+            text: `Connection lost — reconnecting in ${Math.round(delay / 1000)}s (attempt ${attempt}/${RETRY_DELAYS_MS.length})…`,
+          });
+          await new Promise<void>((resolveDelay, rejectDelay) => {
+            const t = setTimeout(resolveDelay, delay);
+            controller.signal.addEventListener('abort', () => {
+              clearTimeout(t);
+              const abortErr = new Error('Aborted');
+              abortErr.name = 'AbortError';
+              rejectDelay(abortErr);
+            }, { once: true });
+          });
+        }
       }
 
       await applyFeedback(consensusRef.current);
     } catch (err: any) {
-      if (err.name === 'AbortError') return;
+      if (err?.name === 'AbortError') return;
       const msg = err?.message || 'Unknown error';
       // Surface actionable detail for network errors
       const detail =
