@@ -5,7 +5,7 @@ import {
   type ReviewMeta,
 } from '../contexts/AutoReviewContext';
 import { computePlanDiff } from '../utils/planDiffEngine';
-import { requestNotificationPermission, notify } from '../utils/notifications';
+import { notify } from '../utils/notifications';
 import { addCost, getTodayCost, getCostOverDays, formatCost, RED_TEAM_COST_ESTIMATE } from '../utils/costTracker';
 
 // Re-export ReviewMeta so existing callers (`@plannotator/ui/components/AutoReviewCountdown`)
@@ -133,11 +133,6 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
   useEffect(() => {
     planRef.current = plan;
   }, [plan]);
-
-  // Request notification permission early so later notifications work.
-  useEffect(() => {
-    requestNotificationPermission();
-  }, []);
 
   // Auto-start the countdown on mount (unless disabled).
   // If a multi-LLM review already ran (e.g. via shell), skip straight to
