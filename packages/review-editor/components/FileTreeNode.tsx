@@ -79,8 +79,12 @@ export const FileTreeNodeItem: React.FC<FileTreeNodeProps> = ({
           <span className="truncate">{node.name}</span>
           {(node.additions > 0 || node.deletions > 0) && (
             <div className="flex items-center gap-1.5 ml-auto flex-shrink-0 text-[10px]">
-              <span className="additions">+{node.additions}</span>
-              <span className="deletions">-{node.deletions}</span>
+              {node.additions > 0 && (
+                <span className="additions">+{node.additions}</span>
+              )}
+              {node.deletions > 0 && (
+                <span className="deletions">-{node.deletions}</span>
+              )}
             </div>
           )}
         </button>
@@ -155,8 +159,29 @@ export const FileTreeNodeItem: React.FC<FileTreeNodeProps> = ({
             {annotationCount > 0 && (
               <span className="text-primary font-medium">{annotationCount}</span>
             )}
-            <span className="additions">+{node.file!.additions}</span>
-            <span className="deletions">-{node.file!.deletions}</span>
+            {node.file!.additions > 0 && (
+              <span className="additions">+{node.file!.additions}</span>
+            )}
+            {node.file!.deletions > 0 && (
+              <span className="deletions">-{node.file!.deletions}</span>
+            )}
+            {/* Change-type marker — modified is deliberately undecorated so
+                added/deleted/renamed pop (diffshub treatment; renamed uses
+                its blue). */}
+            {node.file!.status === 'added' && (
+              <span className="text-success font-semibold" title="Added file">A</span>
+            )}
+            {node.file!.status === 'deleted' && (
+              <span className="text-destructive font-semibold" title="Deleted file">D</span>
+            )}
+            {node.file!.status === 'renamed' && (
+              <span
+                className="text-[#007aff] font-semibold"
+                title={node.file!.oldPath ? `Renamed from ${node.file!.oldPath}` : 'Renamed file'}
+              >
+                R
+              </span>
+            )}
           </div>
         </button>
       </ContextMenu.Trigger>

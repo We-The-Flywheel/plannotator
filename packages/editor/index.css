@@ -1,4 +1,9 @@
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/geist-mono";
 @import "tailwindcss";
+@import "@plannotator/webtui/styles.css";
+
+@plugin "tailwindcss-animate";
 
 /* Tell Tailwind where to scan for classes */
 @source "../ui/components/**/*.tsx";
@@ -7,6 +12,33 @@
 @source "./components/**/*.tsx";
 
 @import "../ui/theme.css";
+
+/* Keep xterm's scrollback layer aligned with the host app terminal palette. */
+[data-annotate-agent-terminal="true"] .webtui-shell {
+  background-color: var(--webtui-background) !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+}
+
+[data-annotate-agent-terminal="true"] .webtui-terminal,
+[data-annotate-agent-terminal="true"] .xterm,
+[data-annotate-agent-terminal="true"] .xterm-screen {
+  background-color: var(--webtui-background) !important;
+}
+
+[data-annotate-agent-terminal="true"] .webtui-shell .xterm-viewport {
+  background-color: var(--webtui-background) !important;
+  scrollbar-width: none;
+}
+
+[data-annotate-agent-terminal="true"] .webtui-shell .xterm-viewport::-webkit-scrollbar {
+  display: none;
+}
+
+[data-annotate-agent-terminal="true"] .webtui-shell .xterm-scrollbar {
+  display: none !important;
+  width: 0 !important;
+}
 
 /* Code blocks */
 pre code.hljs {
@@ -34,6 +66,13 @@ pre code.hljs .hljs-code {
 
 /* Light mode code - override hljs dark theme */
 .light pre code.hljs {
+  color: oklch(0.25 0.02 260) !important;
+}
+
+/* The code-file hover preview is a <div class="hljs">, so the pre code.hljs
+   rule above misses it. The unscoped .hljs-* token rules below already color
+   its tokens; this just supplies the matching default text color. */
+.light .code-snippet-preview {
   color: oklch(0.25 0.02 260) !important;
 }
 
@@ -76,50 +115,8 @@ pre code.hljs .hljs-code {
   color: oklch(0.45 0.20 280) !important;
 }
 
-/* Annotation highlights */
-.annotation-highlight {
-  border-radius: 2px;
-  padding: 0 2px;
-  margin: 0 -2px;
-}
-
-.annotation-highlight.deletion {
-  background: oklch(from var(--destructive) l c h / 0.35);
-  text-decoration: line-through;
-  text-decoration-color: var(--destructive);
-  text-decoration-thickness: 2px;
-}
-
-.annotation-highlight.comment {
-  background: oklch(0.70 0.18 60 / 0.3);
-  border-bottom: 2px solid var(--accent);
-}
-
-/* Light mode: softer highlights */
-.light .annotation-highlight.deletion {
-  background: oklch(0.65 0.22 25 / 0.2);
-}
-
-.light .annotation-highlight.comment {
-  background: oklch(0.70 0.20 60 / 0.15);
-}
-
-.annotation-highlight.focused {
-  background: oklch(from var(--focus-highlight) l c h / 0.45) !important;
-  box-shadow: 0 0 8px oklch(from var(--focus-highlight) l c h / 0.4);
-  border-bottom: 2px solid var(--focus-highlight);
-  filter: none;
-}
-
-.light .annotation-highlight.focused {
-  background: oklch(0.70 0.22 200 / 0.3) !important;
-  box-shadow: 0 0 6px oklch(0.60 0.20 200 / 0.3);
-}
-
-.annotation-highlight:hover {
-  filter: brightness(1.2);
-  cursor: pointer;
-}
+/* Annotation highlights moved to packages/ui/theme.css (shared with the
+   code-review description annotations). */
 
 /* ========================================
    Plan Diff Styles

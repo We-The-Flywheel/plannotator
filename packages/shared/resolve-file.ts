@@ -13,7 +13,7 @@ import { homedir } from "os";
 import { isAbsolute, join, resolve, win32 } from "path";
 import { existsSync, readdirSync, type Dirent } from "fs";
 
-const MARKDOWN_PATH_REGEX = /\.mdx?$/i;
+const MARKDOWN_PATH_REGEX = /\.(mdx?|txt)$/i;
 
 import { CODE_FILE_REGEX as CODE_FILE_BASENAME_REGEX } from "./code-file";
 export { CODE_FILE_REGEX, isCodeFilePath } from "./code-file";
@@ -222,7 +222,7 @@ function walkFiles(
 
 function walkMarkdownFiles(dir: string, root: string, results: string[], ignoredDirs: string[]): void {
 	try {
-		walkFiles(dir, root, results, ignoredDirs, (name) => /\.mdx?$/i.test(name));
+		walkFiles(dir, root, results, ignoredDirs, (name) => /\.(mdx?|txt)$/i.test(name));
 	} catch {
 		/* fail soft for markdown — preserves existing behavior */
 	}

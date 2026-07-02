@@ -1,6 +1,7 @@
-import type { CodeAnnotation, ConventionalLabel, ConventionalDecoration } from '@plannotator/ui/types';
+import type { CodeAnnotation, ConventionalLabel, ConventionalDecoration, CommentAnnotation, Annotation } from '@plannotator/ui/types';
 import type { PRMetadata } from '@plannotator/shared/pr-types';
 import { getMRLabel, getMRNumberLabel, getDisplayRepo } from '@plannotator/shared/pr-types';
+import { exportAnnotations, parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 
 /**
  * Format a conventional comment prefix per the Conventional Comments spec:
@@ -36,6 +37,10 @@ function describeDiff(ctx: FeedbackDiffContext): string {
     case "staged":       label = "Staged changes"; break;
     case "unstaged":     label = "Unstaged changes"; break;
     case "last-commit":  label = "Last commit"; break;
+    case "workspace-current":  label = "Workspace current changes"; break;
+    case "workspace-staged":   label = "Workspace staged changes"; break;
+    case "workspace-unstaged": label = "Workspace unstaged changes"; break;
+    case "workspace-last":     label = "Workspace last change"; break;
     case "jj-current":   label = "Current change"; break;
     case "jj-last":      label = "Last change"; break;
     case "jj-line":      label = base ? `Line of work vs \`${base}\`` : "Line of work"; break;
@@ -113,6 +118,23 @@ function formatFileAnnotations(fileAnnotations: CodeAnnotation[], headingLevel =
   return output;
 }
 
+function renderGeneralComments(annotations: CodeAnnotation[]): string {
+  let output = '## General\n\n';
+  for (const ann of annotations) {
+    const prefix = formatConventionalPrefix(ann.conventionalLabel, ann.decorations);
+    if (ann.text) {
+      output += `${prefix}${ann.text}\n`;
+    } else if (prefix) {
+      output += `${prefix.trimEnd()}\n`;
+    }
+    if (ann.reasoning) {
+      output += `\n**Reasoning:** ${ann.reasoning}\n`;
+    }
+    output += '\n';
+  }
+  return output;
+}
+
 function groupByFile(annotations: CodeAnnotation[]): Map<string, CodeAnnotation[]> {
   const grouped = new Map<string, CodeAnnotation[]>();
   for (const ann of annotations) {
@@ -166,7 +188,13 @@ export function exportReviewFeedback(
     return '# Code Review\n\nNo feedback provided.';
   }
 
-  const prUrls = new Set(annotations.map(a => a.prUrl).filter(Boolean));
+  // General (review-level) comments belong to no file — render them in their own
+  // section and group only the rest by file.
+  const general = annotations.filter(a => (a.scope ?? 'line') === 'general');
+  const placed = annotations.filter(a => (a.scope ?? 'line') !== 'general');
+  const generalSection = general.length > 0 ? renderGeneralComments(general) : '';
+
+  const prUrls = new Set(placed.map(a => a.prUrl).filter(Boolean));
   const isMultiPR = prUrls.size > 1;
   const singlePrUrl = prUrls.size === 1 ? [...prUrls][0] : null;
   const prMismatch = singlePrUrl && prMeta && singlePrUrl !== prMeta.url;
@@ -184,7 +212,8 @@ export function exportReviewFeedback(
         `${prMeta.url}\n\n`
       : `# Code Review Feedback\n\n${diffContext ? `**Diff:** ${describeDiff(diffContext)}\n\n` : ''}`;
 
-    output += renderScopedGroups(annotations, '##');
+    output += renderScopedGroups(placed, '##');
+    output += generalSection;
     return output;
   }
 
@@ -192,7 +221,7 @@ export function exportReviewFeedback(
   let output = isMultiPR ? '# Multi-PR Review\n\n' : '# Code Review\n\n';
 
   const byPR = new Map<string, CodeAnnotation[]>();
-  for (const ann of annotations) {
+  for (const ann of placed) {
     const key = ann.prUrl ?? '_none';
     const existing = byPR.get(key) || [];
     existing.push(ann);
@@ -218,5 +247,51 @@ export function exportReviewFeedback(
     output += renderScopedGroups(prAnnotations, '###');
   }
 
+  output += generalSection;
   return output;
+}
+
+/**
+ * The prose-annotation feedback block (PR description notes + PR comment notes),
+ * joined. Shared by the agent feedback (feedbackMarkdown) and the GitHub review
+ * body seed, so the two never drift. Returns '' when there are no prose notes.
+ */
+export function buildProseFeedback(
+  descriptionAnnotations: Annotation[],
+  commentAnnotations: CommentAnnotation[],
+  descriptionBody: string | undefined,
+): string {
+  const parts: string[] = [];
+  if (descriptionAnnotations.length > 0 && descriptionBody) {
+    parts.push(exportAnnotations(
+      parseMarkdownToBlocks(descriptionBody),
+      descriptionAnnotations,
+      [],
+      'PR Description Feedback',
+      'PR description',
+    ));
+  }
+  if (commentAnnotations.length > 0) {
+    parts.push(exportCommentAnnotations(commentAnnotations));
+  }
+  return parts.join('\n\n');
+}
+
+/**
+ * Format feedback from PR comment annotations. Unlike code (the agent can read
+ * the repo) a PR comment is invisible to the agent, so the full comment body is
+ * quoted inline alongside the reviewer's note.
+ */
+export function exportCommentAnnotations(annotations: CommentAnnotation[]): string {
+  if (annotations.length === 0) return '';
+  let output = '# PR Comment Feedback\n\n';
+  for (const ann of annotations) {
+    output += `## Comment by @${ann.commentAuthor}\n\n`;
+    if (ann.commentBody.trim()) {
+      const quoted = ann.commentBody.trim().split('\n').map(line => `> ${line}`).join('\n');
+      output += `${quoted}\n\n`;
+    }
+    output += `${ann.text}\n\n`;
+  }
+  return output.trimEnd() + '\n';
 }

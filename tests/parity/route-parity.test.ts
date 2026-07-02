@@ -38,8 +38,24 @@ function extractAIEndpointKeys(filePath: string): string[] {
   return routes;
 }
 
+/**
+ * Fork-only routes (multi-LLM auto-review pipeline) that exist on the Bun
+ * servers by design and are intentionally NOT mirrored on Pi. Excluded from
+ * parity so the check keeps guarding the shared upstream surface.
+ */
+const FORK_ONLY_ROUTES = new Set([
+  "/api/apply-review",
+  "/api/claude-md-rules/waive",
+  "/api/multi-llm-review",
+  "/api/multi-llm-review-stream",
+  "/api/openrouter/balance",
+  "/api/policies/evaluate",
+  "/api/red-team-review",
+  "/api/red-team-review-stream",
+]);
+
 function unique(routes: string[]): string[] {
-  return [...new Set(routes)].sort();
+  return [...new Set(routes)].filter((r) => !FORK_ONLY_ROUTES.has(r)).sort();
 }
 
 // --- File paths ---

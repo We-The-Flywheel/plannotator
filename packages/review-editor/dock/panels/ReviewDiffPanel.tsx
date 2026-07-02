@@ -3,6 +3,7 @@ import type { IDockviewPanelProps } from 'dockview-react';
 import { DiffViewer } from '../../components/DiffViewer';
 import { useReviewState } from '../ReviewStateContext';
 import { getReviewDiffPanelFilePath, type ReviewDiffPanelParams } from '../reviewPanelTypes';
+import { annotationMatchesPrScope } from '../../utils/annotationScope';
 
 /**
  * Thin adapter between dockview's panel API and the existing DiffViewer.
@@ -27,8 +28,7 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
       const currentDiffScope = state.prDiffScope;
       return state.allAnnotations.filter((a) =>
         a.filePath === file.path &&
-        (!a.prUrl || !currentPrUrl || a.prUrl === currentPrUrl) &&
-        (!a.diffScope || !currentDiffScope || a.diffScope === currentDiffScope)
+        annotationMatchesPrScope(a, currentPrUrl, currentDiffScope)
       );
     },
     [state.allAnnotations, file, state.prMetadata, state.prDiffScope]
@@ -70,6 +70,7 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
         patch={file.patch}
         filePath={file.path}
         oldPath={file.oldPath}
+        status={file.status}
         reviewBase={state.reviewBase}
         prUrl={state.prMetadata?.url}
         prDiffScope={state.prDiffScope}
@@ -80,10 +81,12 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
         lineDiffType={state.lineDiffType}
         disableLineNumbers={state.disableLineNumbers}
         disableBackground={state.disableBackground}
+        expandUnchanged={state.expandUnchanged}
         fontFamily={state.fontFamily}
         fontSize={state.fontSize}
         annotations={fileAnnotations}
         selectedAnnotationId={state.selectedAnnotationId}
+        scrollTargetAnnotation={state.scrollTargetAnnotation}
         pendingSelection={state.pendingSelection}
         onLineSelection={state.onLineSelection}
         onAddAnnotation={state.onAddAnnotation}

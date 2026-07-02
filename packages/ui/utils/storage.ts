@@ -79,6 +79,21 @@ export function setAutoCloseDelay(delay: AutoCloseDelay): void {
 }
 
 /**
+ * Last-used "Open in app" target.
+ * Stores the app id from the OPEN_IN_APPS catalog (packages/shared/open-in-apps.ts).
+ * Defaults to 'reveal' (the file manager) when unset.
+ */
+const OPEN_IN_APP_KEY = 'plannotator-open-in-app';
+
+export function getLastOpenInApp(): string {
+  return getItem(OPEN_IN_APP_KEY) ?? 'reveal';
+}
+
+export function setLastOpenInApp(id: string): void {
+  setItem(OPEN_IN_APP_KEY, id);
+}
+
+/**
  * Storage object with localStorage-like API
  */
 export const storage = {

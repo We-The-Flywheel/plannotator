@@ -16,6 +16,11 @@ export interface PlanDenyFeedbackOptions {
   planFilePath?: string;
 }
 
+export interface AnnotateFileFeedbackOptions {
+  filePath: string;
+  fileHeader?: "File" | "Folder" | string;
+}
+
 export const planDenyFeedback = (
   feedback: string,
   toolName: string = "ExitPlanMode",
@@ -27,3 +32,14 @@ export const planDenyFeedback = (
 
   return `YOUR PLAN WAS NOT APPROVED.\n\nYou MUST revise the plan to address ALL of the feedback below before calling ${toolName} again.\n\nRules:\n${planFileRule}- Do not resubmit the same plan unchanged.\n- Do NOT change the plan title (first # heading) unless the user explicitly asks you to.\n\n${feedback || "Plan changes requested"}`;
 };
+
+export const annotateFileFeedback = (
+  feedback: string,
+  options: AnnotateFileFeedbackOptions,
+): string => {
+  const fileHeader = options.fileHeader ?? "File";
+  return `# Markdown Annotations\n\n${fileHeader}: ${options.filePath}\n\n${feedback}\n\nPlease address the annotation feedback above.`;
+};
+
+export const annotateMessageFeedback = (feedback: string): string =>
+  `# Message Annotations\n\n${feedback}\n\nPlease address the annotation feedback above.`;

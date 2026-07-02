@@ -75,12 +75,23 @@ export interface AgentJobInfo {
   diffScope?: string;
   /** Diff context at launch time (see AgentJobDiffContext). */
   diffContext?: AgentJobDiffContext;
+  /** Resolved review profile id at launch time (e.g. "builtin:default", "user:security"). */
+  reviewProfileId?: string;
+  /** Resolved review profile label — rides on findings so the UI can show a profile tag. */
+  reviewProfileLabel?: string;
 }
 
 export interface AgentCapability {
   id: string;
   name: string;
   available: boolean;
+  /**
+   * Provider-discovered model catalog (currently only Cursor). Best-effort and
+   * account-specific — populated from the provider CLI at capability-detection
+   * time, empty when discovery fails or the CLI is unauthenticated. The UI
+   * drives its model picker from this instead of a hardcoded list.
+   */
+  models?: { id: string; label: string }[];
 }
 
 export interface AgentCapabilities {
@@ -129,4 +140,17 @@ export function isTerminalStatus(status: AgentJobStatus): boolean {
 /** Generate the source identifier for a job from its ID. */
 export function jobSource(id: string): string {
   return "agent-" + id.slice(0, 8);
+}
+
+// ---------------------------------------------------------------------------
+// Review ingestion completion semantics
+// ---------------------------------------------------------------------------
+
+/** Calm, provider-neutral failure reason. Never leak schema/CLI internals. */
+export const REVIEW_OUTPUT_FAILED = "Review finished but produced no usable findings.";
+
+/** Flip a job to failed with a calm one-liner (Code Tour precedent). */
+export function markJobReviewFailed(job: AgentJobInfo, error: string): void {
+  job.status = "failed";
+  job.error = error;
 }

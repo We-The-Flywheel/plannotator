@@ -8,6 +8,7 @@ import { CopyButton } from '../../components/CopyButton';
 import { LiveLogViewer } from '../../components/LiveLogViewer';
 import { ScrollFade } from '../../components/ScrollFade';
 import { exportReviewFeedback } from '../../utils/exportFeedback';
+import { annotationScope, commentCopyText } from '../../utils/annotationDisplay';
 
 // ---------------------------------------------------------------------------
 // Panel
@@ -83,9 +84,12 @@ export const ReviewAgentJobDetailPanel: React.FC<IDockviewPanelProps> = (props) 
   const dismissedCount = useMemo(() => displayAnnotations.filter((d) => d.dismissed).length, [displayAnnotations]);
 
   const handleAnnotationClick = useCallback((ann: CodeAnnotation) => {
-    state.openDiffFile(ann.filePath);
-    state.onSelectAnnotation(ann.id);
-  }, [state.openDiffFile, state.onSelectAnnotation]);
+    // General comments belong to no file — nothing to open in the diff.
+    if (ann.filePath) state.openDiffFile(ann.filePath);
+    // Navigate (select + scroll): clicking a finding should jump the diff to it,
+    // not merely toggle its highlight.
+    state.onNavigateToAnnotation(ann.id);
+  }, [state.openDiffFile, state.onNavigateToAnnotation]);
 
   // Copy All uses the diff context snapshotted on the JOB at launch, not the
   // current UI state — so if the reviewer switches modes/bases after the job
@@ -350,7 +354,7 @@ function ProviderPill({ provider, engine, model }: { provider: string; engine?: 
     const engineLabel = engine === 'codex' ? 'Codex' : 'Claude';
     label = model && engine !== 'codex' ? `Tour · ${engineLabel} ${model.charAt(0).toUpperCase() + model.slice(1)}` : `Tour · ${engineLabel}`;
   } else {
-    label = provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : 'Shell';
+    label = provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : provider === 'cursor' ? 'Cursor' : provider === 'opencode' ? 'OpenCode' : 'Shell';
   }
   return (
     <span className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${
@@ -408,7 +412,8 @@ function AnnotationRow({ annotation: ann, dismissed, onClick }: {
   dismissed: boolean;
   onClick: (ann: CodeAnnotation) => void;
 }) {
-  const copyText = ann.text ? `${ann.filePath}:${ann.lineStart}${ann.lineEnd !== ann.lineStart ? `-${ann.lineEnd}` : ''}\n${ann.text}${ann.reasoning ? `\n\nReasoning: ${ann.reasoning}` : ''}` : '';
+  const scope = annotationScope(ann);
+  const copyText = ann.text ? commentCopyText(ann, scope) : '';
   const severity = ann.severity ? SEVERITY_STYLES[ann.severity] : null;
   return (
     <div
@@ -421,12 +426,29 @@ function AnnotationRow({ annotation: ann, dismissed, onClick }: {
         {severity && (
           <span className={`w-2 h-2 rounded-full flex-shrink-0 ${severity.dot}`} title={severity.label} />
         )}
-        <span className={`font-mono truncate ${dismissed ? 'line-through text-muted-foreground' : 'text-primary'}`}>
-          {ann.filePath}
-        </span>
-        <span className="text-muted-foreground flex-shrink-0">
-          L{ann.lineStart}{ann.lineEnd !== ann.lineStart ? `–${ann.lineEnd}` : ''}
-        </span>
+        {scope === 'general' ? (
+          <span className={`font-mono uppercase tracking-wider flex-shrink-0 ${dismissed ? 'line-through text-muted-foreground' : 'text-primary'}`}>
+            general
+          </span>
+        ) : (
+          <>
+            <span className={`font-mono truncate ${dismissed ? 'line-through text-muted-foreground' : 'text-primary'}`}>
+              {ann.filePath}
+            </span>
+            {scope === 'file' ? (
+              <span className="text-muted-foreground flex-shrink-0 uppercase tracking-wider">file</span>
+            ) : (
+              <span className="text-muted-foreground flex-shrink-0">
+                L{ann.lineStart}{ann.lineEnd !== ann.lineStart ? `–${ann.lineEnd}` : ''}
+              </span>
+            )}
+          </>
+        )}
+        {ann.reviewProfileLabel && (
+          <span className="px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider bg-accent/10 text-accent/90 flex-shrink-0">
+            {ann.reviewProfileLabel}
+          </span>
+        )}
         {dismissed && (
           <span className="px-1 py-0.5 rounded text-[10px] uppercase tracking-wider bg-muted text-muted-foreground/60">dismissed</span>
         )}
@@ -437,12 +459,12 @@ function AnnotationRow({ annotation: ann, dismissed, onClick }: {
         )}
       </div>
       {ann.text && (
-        <p className={`text-xs mt-1 leading-relaxed ${dismissed ? 'text-muted-foreground/40' : 'text-foreground/80'}`}>
+        <p className={`text-xs mt-1 leading-relaxed break-words [overflow-wrap:anywhere] ${dismissed ? 'text-muted-foreground/40' : 'text-foreground/80'}`}>
           {ann.text}
         </p>
       )}
       {ann.reasoning && (
-        <p className="text-[11px] text-muted-foreground/60 leading-relaxed mt-1.5">
+        <p className="text-[11px] text-muted-foreground/60 leading-relaxed mt-1.5 break-words [overflow-wrap:anywhere]">
           {ann.reasoning}
         </p>
       )}

@@ -42,10 +42,14 @@ import {
 } from "./storage";
 import { getRepoInfo } from "./repo";
 import { detectProjectName } from "./project";
-import { saveConfig, detectGitUser, getServerConfig } from "./config";
-import { handleImage, handleUpload, handleAgents, handleServerReady, handleDraftSave, handleDraftLoad, handleDraftDelete, handleFavicon, handleAutomationsRoute, type OpencodeClient } from "./shared-handlers";
+import { loadConfig, saveConfig, detectGitUser, getServerConfig } from "./config";
+import { readImprovementHook, getImprovementHookExpectedPath } from "@plannotator/shared/improvement-hooks";
+import { composeImproveContext } from "@plannotator/shared/pfm-reminder";
+import { handleImage, handleUpload, handleAgents, handleServerReady, handleDraftSave, handleDraftLoad, handleDraftDelete, handleFavicon, handleSaveNotes, readDraftGenerationFromBody, handleAutomationsRoute, type OpencodeClient } from "./shared-handlers";
 import { contentHash, deleteDraft } from "./draft";
-import { handleDoc, handleObsidianVaults, handleObsidianFiles, handleObsidianDoc, handleFileBrowserFiles } from "./reference-handlers";
+import { handleDoc, handleDocExists, handleObsidianVaults, handleObsidianFiles, handleObsidianDoc, handleFileBrowserFiles } from "./reference-handlers";
+import { handleFileBrowserFilesStream } from "./reference-watch";
+import { warmFileListCache } from "@plannotator/shared/resolve-file";
 import { templateToEntry, type AutomationEntry } from "./automations";
 import { createEditorAnnotationHandler } from "./editor-annotations";
 import { createExternalAnnotationHandler } from "./external-annotations";
@@ -56,6 +60,8 @@ import { runRedTeamReview, runRedTeamReviewStreaming } from "./red-team-review";
 import { evaluatePolicy } from "./policies";
 import { findSimilarPastPlans, similarPlanToAnnotationInput } from "./archive-similarity";
 import { isWSL } from "./browser";
+import { AI_QUERY_ENDPOINT, createAIRuntime } from "./ai-runtime";
+import type { AIEndpoints } from "@plannotator/ai";
 
 // Re-export utilities
 export { isRemoteSession, getServerPort } from "./remote";
@@ -159,6 +165,10 @@ export async function startPlannotatorServer(
   // Mutable: updated when multi-LLM deliberation revises the plan
   let plan = initialPlan;
 
+  // Side-channel pre-warm: kick off the code-file walk now so the
+  // renderer's POST /api/doc/exists lands on warm cache.
+  void warmFileListCache(process.cwd(), "code");
+
   const isRemote = isRemoteSession();
   const configuredPort = getServerPort();
   const wslFlag = await isWSL();
@@ -185,6 +195,7 @@ export async function startPlannotatorServer(
   // Live execution mirror — only relevant during plan-review sessions.
   // Inert until `start(sinceMs)` is called from the approve handler.
   const executionWatch = mode !== "archive" ? createExecutionWatch(process.cwd()) : null;
+  const aiRuntime = mode !== "archive" ? await createAIRuntime() : null;
   const slug = mode !== "archive" ? generateSlug(plan) : "";
 
   // CLAUDE.md-aware static review: scan the plan against project + global
@@ -283,6 +294,9 @@ export async function startPlannotatorServer(
       server = Bun.serve({
         hostname: getServerHostname(),
         port: configuredPort,
+        // Bun's default 10s idleTimeout kills AI SSE streams that stall
+        // between bytes (e.g. while a permission prompt waits on the user).
+        idleTimeout: 0,
 
         async fetch(req, server) {
           const url = new URL(req.url);
@@ -379,15 +393,42 @@ export async function startPlannotatorServer(
             return handleDoc(req);
           }
 
+          // API: Batch existence check for code-file paths the renderer detected
+          if (url.pathname === "/api/doc/exists" && req.method === "POST") {
+            return handleDocExists(req);
+          }
+
+          // API: Hook status for the Settings Hooks tab
+          if (url.pathname === "/api/hooks/status" && req.method === "GET") {
+            const config = loadConfig();
+            const hook = readImprovementHook("enterplanmode-improve");
+            const pfmEnabled = config.pfmReminder === true;
+            const composed = composeImproveContext({
+              pfmEnabled,
+              improvementHookContent: hook?.content ?? null,
+            });
+            return Response.json({
+              pfmReminder: { enabled: pfmEnabled },
+              improvementHook: {
+                present: !!hook,
+                filePath: hook?.filePath ?? getImprovementHookExpectedPath("enterplanmode-improve"),
+                fileSize: hook?.content?.length ?? null,
+                content: hook?.content ?? null,
+              },
+              composedLength: composed?.length ?? null,
+            });
+          }
+
           // API: Update user config (write-back to ~/.plannotator/config.json)
           if (url.pathname === "/api/config" && req.method === "POST") {
             try {
-              const body = (await req.json()) as { displayName?: string; diffOptions?: Record<string, unknown>; conventionalComments?: boolean; conventionalLabels?: unknown[] | null };
+              const body = (await req.json()) as { displayName?: string; diffOptions?: Record<string, unknown>; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
               const toSave: Record<string, unknown> = {};
               if (body.displayName !== undefined) toSave.displayName = body.displayName;
               if (body.diffOptions !== undefined) toSave.diffOptions = body.diffOptions;
               if (body.conventionalComments !== undefined) toSave.conventionalComments = body.conventionalComments;
               if (body.conventionalLabels !== undefined) toSave.conventionalLabels = body.conventionalLabels;
+              if (body.pfmReminder !== undefined) toSave.pfmReminder = body.pfmReminder;
               if (Object.keys(toSave).length > 0) saveConfig(toSave as Parameters<typeof saveConfig>[0]);
               return Response.json({ ok: true });
             } catch {
@@ -450,6 +491,13 @@ export async function startPlannotatorServer(
             return handleFileBrowserFiles(req);
           }
 
+          // API: Watch file browser roots and refresh the tree/status snapshot on changes
+          if (url.pathname === "/api/reference/files/stream" && req.method === "GET") {
+            return handleFileBrowserFilesStream(req, {
+              disableIdleTimeout: () => server.timeout(req, 0),
+            });
+          }
+
           // API: Get available agents (OpenCode only)
           if (url.pathname === "/api/agents") {
             return handleAgents(options.opencodeClient);
@@ -458,7 +506,7 @@ export async function startPlannotatorServer(
           // API: Annotation draft persistence
           if (url.pathname === "/api/draft") {
             if (req.method === "POST") return handleDraftSave(req, draftKey);
-            if (req.method === "DELETE") return handleDraftDelete(draftKey);
+            if (req.method === "DELETE") return handleDraftDelete(draftKey, req);
             return handleDraftLoad(draftKey);
           }
 
@@ -482,41 +530,26 @@ export async function startPlannotatorServer(
           const automationsResponse = await handleAutomationsRoute(req, url, "plan", options.bundledAutomations || []);
           if (automationsResponse) return automationsResponse;
 
+          if (url.pathname.startsWith("/api/ai/")) {
+            if (!aiRuntime) {
+              if (url.pathname.slice("/api/ai/".length) === "capabilities" && req.method === "GET") {
+                return Response.json({ available: false, providers: [] });
+              }
+              return Response.json({ error: "AI backend not available" }, { status: 503 });
+            }
+            const handler = aiRuntime.endpoints[url.pathname as keyof AIEndpoints];
+            if (handler) {
+              if (url.pathname === AI_QUERY_ENDPOINT) {
+                server.timeout(req, 0);
+              }
+              return handler(req);
+            }
+            return Response.json({ error: "Not found" }, { status: 404 });
+          }
+
           // API: Save to notes (decoupled from approve/deny)
           if (url.pathname === "/api/save-notes" && req.method === "POST") {
-            const results: { obsidian?: IntegrationResult; bear?: IntegrationResult; octarine?: IntegrationResult } = {};
-
-            try {
-              const body = (await req.json()) as {
-                obsidian?: ObsidianConfig;
-                bear?: BearConfig;
-                octarine?: OctarineConfig;
-              };
-
-              // Run integrations in parallel — they're independent
-              const promises: Promise<void>[] = [];
-              if (body.obsidian?.vaultPath && body.obsidian?.plan) {
-                promises.push(saveToObsidian(body.obsidian).then(r => { results.obsidian = r; }));
-              }
-              if (body.bear?.plan) {
-                promises.push(saveToBear(body.bear).then(r => { results.bear = r; }));
-              }
-              if (body.octarine?.plan && body.octarine?.workspace) {
-                promises.push(saveToOctarine(body.octarine).then(r => { results.octarine = r; }));
-              }
-              await Promise.allSettled(promises);
-
-              for (const [name, result] of Object.entries(results)) {
-                if (!result?.success && result) {
-                  console.error(`[${name}] Save failed: ${result.error}`);
-                }
-              }
-            } catch (err) {
-              console.error(`[Save Notes] Error:`, err);
-              return Response.json({ error: "Save failed" }, { status: 500 });
-            }
-
-            return Response.json({ ok: true, results });
+            return handleSaveNotes(req);
           }
 
           // --- Multi-LLM Review Endpoints ---
@@ -922,6 +955,7 @@ INSTRUCTIONS:
             let requestedPermissionMode: string | undefined;
             let planSaveEnabled = true; // default to enabled for backwards compat
             let planSaveCustomPath: string | undefined;
+            let draftGeneration: number | undefined;
             try {
               const body = (await req.json().catch(() => ({}))) as {
                 obsidian?: ObsidianConfig;
@@ -931,7 +965,9 @@ INSTRUCTIONS:
                 agentSwitch?: string;
                 planSave?: { enabled: boolean; customPath?: string };
                 permissionMode?: string;
+                draftGeneration?: number;
               };
+              draftGeneration = readDraftGenerationFromBody(body);
 
               // Capture feedback if provided (for "approve with notes")
               if (body.feedback) {
@@ -989,7 +1025,7 @@ INSTRUCTIONS:
             }
 
             // Clean up draft on successful submit
-            deleteDraft(draftKey);
+            deleteDraft(draftKey, draftGeneration);
 
             // Use permission mode from client request if provided, otherwise fall back to hook input
             const effectivePermissionMode = requestedPermissionMode || permissionMode;
@@ -1008,11 +1044,14 @@ INSTRUCTIONS:
             let feedback = "Plan rejected by user";
             let planSaveEnabled = true; // default to enabled for backwards compat
             let planSaveCustomPath: string | undefined;
+            let draftGeneration: number | undefined;
             try {
               const body = (await req.json()) as {
                 feedback?: string;
                 planSave?: { enabled: boolean; customPath?: string };
+                draftGeneration?: number;
               };
+              draftGeneration = readDraftGenerationFromBody(body);
               feedback = body.feedback || feedback;
 
               // Capture plan save settings
@@ -1031,7 +1070,7 @@ INSTRUCTIONS:
               savedPath = saveFinalSnapshot(slug, "denied", plan, feedback, planSaveCustomPath);
             }
 
-            deleteDraft(draftKey);
+            deleteDraft(draftKey, draftGeneration);
             resolveDecision({ approved: false, feedback, savedPath });
             return Response.json({ ok: true, savedPath });
           }
@@ -1095,6 +1134,7 @@ INSTRUCTIONS:
       // Tear down the execution watcher first so its fs.watch handle and
       // poll interval are released before the HTTP server goes away.
       executionWatch?.stop();
+      aiRuntime?.dispose();
       server.stop();
     },
   };

@@ -89,7 +89,7 @@ export function getPRUser(ref: PRRef): Promise<string | null> {
 
 export function fetchPR(
   ref: PRRef,
-): Promise<{ metadata: PRMetadata; rawPatch: string }> {
+): Promise<{ metadata: PRMetadata; rawPatch: string; patchIncomplete?: boolean }> {
   return fetchPRCore(runtime, ref);
 }
 

@@ -81,12 +81,17 @@ function buildAnnotationFileComments(
     .filter(c => c.body.length > 0);
 }
 
+// The review-level body: file-scoped comments (prefixed with their path) plus
+// general (review-wide) comments, which belong to no file. Both ride here so
+// neither is dropped from a PR submission.
 function buildFileScopedBody(annotations: CodeAnnotation[]): string {
-  return annotations
-    .filter(a => a.scope === 'file')
-    .map(a => a.text ? `**${a.filePath}:** ${a.text}` : '')
-    .filter(Boolean)
-    .join('\n\n');
+  const parts: string[] = [];
+  for (const a of annotations) {
+    const scope = a.scope ?? 'line';
+    if (scope === 'file' && a.text) parts.push(`**${a.filePath}:** ${a.text}`);
+    else if (scope === 'general' && a.text) parts.push(a.text);
+  }
+  return parts.join('\n\n');
 }
 
 export function buildReviewSubmission(
@@ -154,7 +159,9 @@ export function buildReviewSubmission(
     const sample = annotations[0];
     const fileComments = buildAnnotationFileComments(annotations);
     const fileScopedBody = buildFileScopedBody(annotations);
-    const uniqueFiles = new Set(annotations.map(a => a.filePath));
+    // Exclude the "" sentinel path of general (review-level) comments so they
+    // don't inflate the file count.
+    const uniqueFiles = new Set(annotations.map(a => a.filePath).filter(p => p.length > 0));
 
     if (prUrl === currentKey && editorFileComments.length > 0) {
       fileComments.push(...editorFileComments);

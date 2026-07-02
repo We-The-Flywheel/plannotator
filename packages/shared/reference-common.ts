@@ -29,6 +29,19 @@ export const FILE_BROWSER_EXCLUDED = [
 	"storybook-static/",
 ];
 
+const FILE_BROWSER_EXCLUDED_NAMES = new Set(
+	FILE_BROWSER_EXCLUDED.map((entry) => entry.replace(/\/+$/, "")),
+);
+
+export function isFileBrowserExcludedPath(relativePath: string): boolean {
+	const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+	if (!normalized) return false;
+	return normalized
+		.split("/")
+		.filter(Boolean)
+		.some((part) => FILE_BROWSER_EXCLUDED_NAMES.has(part));
+}
+
 export interface VaultNode {
 	name: string;
 	path: string; // relative path within vault

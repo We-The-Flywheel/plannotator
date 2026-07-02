@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useEffect } from 'react';
-import DOMPurify from 'dompurify';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
+import { sanitizeInlineHtml } from '@plannotator/ui/utils/sanitizeHtml';
+import { AnnotatableDescription } from './AnnotatableDescription';
 import { renderInlineMarkdown } from '../utils/renderInlineMarkdown';
 import type { PRContext, PRMetadata } from '@plannotator/shared/pr-types';
 
@@ -12,21 +13,6 @@ interface PRSummaryTabProps {
 /** Check if content contains HTML tags that should be rendered natively. */
 const HTML_TAG_RE = /<[a-z][a-z0-9]*[\s/>]/i;
 const containsHtml = (text: string) => HTML_TAG_RE.test(text);
-
-/** Sanitize HTML using DOMPurify — defense-in-depth for GitHub API content. */
-function sanitizeHtml(html: string): string {
-  return DOMPurify.sanitize(html, {
-    ALLOWED_TAGS: [
-      'sub', 'sup', 'b', 'i', 'em', 'strong', 'br', 'hr', 'p', 'span',
-      'del', 'ins', 'mark', 'small', 'abbr', 'kbd', 'var', 'samp',
-      'details', 'summary', 'blockquote', 'ul', 'ol', 'li',
-      'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'code',
-      'table', 'thead', 'tbody', 'tr', 'th', 'td',
-      'a', 'img', 'div',
-    ],
-    ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'rel', 'target', 'width', 'height', 'align'],
-  });
-}
 
 /** Renders sanitized HTML and hides broken images via ref (no inline event handlers). */
 function SafeHtml({ html, as: Tag = 'div' }: { html: string; as?: 'div' | 'span' }) {
@@ -47,17 +33,17 @@ function SafeHtml({ html, as: Tag = 'div' }: { html: string; as?: 'div' | 'span'
  */
 function renderContent(content: string): React.ReactNode {
   if (containsHtml(content)) {
-    return <SafeHtml html={sanitizeHtml(content)} as="span" />;
+    return <SafeHtml html={sanitizeInlineHtml(content)} as="span" />;
   }
   return renderInlineMarkdown(content);
 }
 
 /** Render a simplified block-level markdown view (no annotation infrastructure). */
-export function MarkdownBody({ markdown }: { markdown: string }) {
+export function MarkdownBody({ markdown, textClassName = 'text-xs' }: { markdown: string; textClassName?: string }) {
   const blocks = useMemo(() => parseMarkdownToBlocks(markdown), [markdown]);
 
   return (
-    <div className="space-y-2.5 text-xs text-foreground/90 leading-relaxed">
+    <div className={`space-y-2.5 ${textClassName} text-foreground/90 leading-relaxed`}>
       {blocks.map((block) => {
         switch (block.type) {
           case 'heading': {
@@ -98,7 +84,7 @@ export function MarkdownBody({ markdown }: { markdown: string }) {
             if (!block.content) return null;
             // If the entire paragraph is HTML, sanitize and render
             if (containsHtml(block.content)) {
-              return <SafeHtml key={block.id} html={sanitizeHtml(block.content)} />;
+              return <SafeHtml key={block.id} html={sanitizeInlineHtml(block.content)} />;
             }
             return <p key={block.id}>{renderInlineMarkdown(block.content)}</p>;
         }
@@ -195,7 +181,7 @@ export const PRSummaryTab: React.FC<PRSummaryTabProps> = React.memo(({ context, 
           <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             Description
           </h3>
-          <MarkdownBody markdown={context.body} />
+          <AnnotatableDescription markdown={context.body} className="md-compact" />
         </div>
       ) : (
         <p className="text-xs text-muted-foreground italic">No description provided.</p>

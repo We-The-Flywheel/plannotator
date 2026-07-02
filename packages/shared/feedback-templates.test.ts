@@ -1,5 +1,9 @@
 import { describe, test, expect } from "bun:test";
-import { planDenyFeedback } from "./feedback-templates";
+import {
+  annotateFileFeedback,
+  annotateMessageFeedback,
+  planDenyFeedback,
+} from "./feedback-templates";
 
 describe("feedback-templates", () => {
   /**
@@ -60,6 +64,26 @@ describe("feedback-templates", () => {
     expect(result).toContain("plans/auth.md");
     expect(result).toContain("edit this file");
     expect(result).toContain("plannotator_submit_plan");
+  });
+
+  test("annotate file feedback mirrors the runtime file prompt shape", () => {
+    const result = annotateFileFeedback("Fix the intro", {
+      fileHeader: "File",
+      filePath: "/repo/README.md",
+    });
+
+    expect(result).toContain("# Markdown Annotations");
+    expect(result).toContain("File: /repo/README.md");
+    expect(result).toContain("Fix the intro");
+    expect(result).toContain("Please address the annotation feedback above.");
+  });
+
+  test("annotate message feedback mirrors the runtime message prompt shape", () => {
+    const result = annotateMessageFeedback("Wrong conclusion");
+
+    expect(result).toContain("# Message Annotations");
+    expect(result).toContain("Wrong conclusion");
+    expect(result).toContain("Please address the annotation feedback above.");
   });
 
 });

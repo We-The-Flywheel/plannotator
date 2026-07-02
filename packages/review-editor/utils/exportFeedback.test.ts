@@ -296,4 +296,24 @@ describe("exportReviewFeedback", () => {
     expect(result).toContain("Review scope: layer");
     expect(result).not.toContain("Review scope: full-stack");
   });
+
+  it("general comments render under a General section, not a file/line group", () => {
+    const result = exportReviewFeedback([
+      ann({ id: "g", scope: "general", filePath: "", lineStart: 0, lineEnd: 0, text: "the overall approach is off" }),
+    ]);
+    expect(result).toContain("## General");
+    expect(result).toContain("the overall approach is off");
+    // No bogus line heading for a review-level comment.
+    expect(result).not.toContain("Line 0");
+  });
+
+  it("mixes line and general: both appear, general in its own section", () => {
+    const result = exportReviewFeedback([
+      ann({ id: "l", text: "line issue" }),
+      ann({ id: "g", scope: "general", filePath: "", lineStart: 0, lineEnd: 0, text: "review-wide note" }),
+    ]);
+    expect(result).toContain("line issue");
+    expect(result).toContain("## General");
+    expect(result).toContain("review-wide note");
+  });
 });

@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect, useMemo, forwardRef, useImperativeH
 import { createPortal } from 'react-dom';
 import hljs from 'highlight.js';
 import { Block, Annotation, AnnotationType, EditorMode, type InputMethod, type ImageAttachment, type ActionsLabelMode } from '../types';
-import { Frontmatter, computeListIndices } from '../utils/parser';
+import { Frontmatter, computeListIndices, groupBlocks } from '../utils/parser';
 import { buildHeadingSlugMap } from '../utils/slugify';
 import { BlockRenderer } from './BlockRenderer';
 import { CodeBlock } from './blocks/CodeBlock';
@@ -33,16 +33,17 @@ class ToolbarErrorBoundary extends React.Component<
   }
 }
 
-import { CommentPopover } from './CommentPopover';
+import { CommentPopover, type CommentAskAIContext, type CommentAskAIHandler } from './CommentPopover';
 import { TaterSpriteSitting } from './TaterSpriteSitting';
 import { AttachmentsButton } from './AttachmentsButton';
+import { MessagesIcon } from './icons/MessagesIcon';
 import { GraphvizBlock } from './GraphvizBlock';
 import { MermaidBlock } from './MermaidBlock';
 import { getImageSrc } from './ImageThumbnail';
 import { isGraphvizLanguage, isMermaidLanguage } from './diagramLanguages';
 import { getIdentity } from '../utils/identity';
 import { type QuickLabel } from '../utils/quickLabels';
-import { DocBadges } from './DocBadges';
+import { DocBadges, type LinkedDocBadgeInfo } from './DocBadges';
 import { PinpointOverlay } from './PinpointOverlay';
 import { usePinpoint } from '../hooks/usePinpoint';
 import { useAnnotationHighlighter } from '../hooks/useAnnotationHighlighter';
@@ -65,6 +66,8 @@ interface ViewerProps {
   onRemoveGlobalAttachment?: (path: string) => void;
   repoInfo?: { display: string; branch?: string; host?: string } | null;
   stickyActions?: boolean;
+  /** Render the plan as a floating card on a grid background (shadow/border/padding). Default false. */
+  gridEnabled?: boolean;
   onOpenLinkedDoc?: (path: string) => void;
   onOpenCodeFile?: (path: string) => void;
   imageBaseDir?: string;
@@ -72,7 +75,7 @@ interface ViewerProps {
    *  so out-of-tree relative references (e.g. `../foo.ts` in a linked doc)
    *  resolve against the doc's own directory rather than only cwd. */
   codePathBaseDir?: string;
-  linkedDocInfo?: { filepath: string; onBack: () => void; label?: string; backLabel?: string } | null;
+  linkedDocInfo?: LinkedDocBadgeInfo | null;
   // Plan diff props
   planDiffStats?: { additions: number; deletions: number; modifications: number } | null;
   isPlanDiffActive?: boolean;
@@ -93,9 +96,19 @@ interface ViewerProps {
   archiveInfo?: { status: 'approved' | 'denied' | 'unknown'; timestamp: string; title: string } | null;
   /** Source attribution for HTML/URL annotations (e.g. URL or filename) */
   sourceInfo?: string;
+  /** Absolute path of the annotated source file for the Open-in-app control. */
+  openInAppPath?: string | null;
+  /**
+   * Message picker affordance — annotate-last mode only. Shown as a button in
+   * the sticky-top action bar so the user can switch to a different recent
+   * assistant message. Clicking opens the full picker in the left sidebar's
+   * Messages tab.
+   */
+  messagePickerInfo?: { current: number; total: number; onOpen: () => void };
   // Checkbox toggle props
   onToggleCheckbox?: (blockId: string, checked: boolean) => void;
   checkboxOverrides?: Map<string, boolean>;
+  onAskAI?: CommentAskAIHandler;
 }
 
 export interface ViewerHandle {
@@ -153,6 +166,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   onRemoveGlobalAttachment,
   repoInfo,
   stickyActions = true,
+  gridEnabled = false,
   planDiffStats,
   isPlanDiffActive,
   onPlanDiffToggle,
@@ -168,8 +182,11 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   actionsLabelMode = 'full',
   archiveInfo,
   sourceInfo,
+  openInAppPath,
+  messagePickerInfo,
   onToggleCheckbox,
   checkboxOverrides,
+  onAskAI,
 }, ref) => {
   const [copied, setCopied] = useState(false);
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
@@ -190,6 +207,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // anchor ids stay stable across re-renders and duplicate heading texts get
   // `-1`/`-2`/... suffixes rather than colliding on the same id.
   const headingSlugMap = useMemo(() => buildHeadingSlugMap(blocks), [blocks]);
+  const isTouchDevice = useMemo(() => window.matchMedia('(pointer: coarse)').matches, []);
   const [hoveredCodeBlock, setHoveredCodeBlock] = useState<{ block: Block; element: HTMLElement } | null>(null);
   const [isCodeBlockToolbarExiting, setIsCodeBlockToolbarExiting] = useState(false);
   const [hoveredTable, setHoveredTable] = useState<{ block: Block; element: HTMLElement } | null>(null);
@@ -200,6 +218,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   const [viewerCommentPopover, setViewerCommentPopover] = useState<{
     anchorEl: HTMLElement;
     contextText: string;
+    selectedText?: string;
     initialText?: string;
     isGlobal: boolean;
     codeBlock?: { block: Block; element: HTMLElement };
@@ -263,6 +282,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
       setViewerCommentPopover({
         anchorEl: element,
         contextText: (codeEl.textContent || '').slice(0, 80),
+        selectedText: codeEl.textContent || '',
         isGlobal: false,
         codeBlock: { block: blocks.find(b => b.id === blockId)!, element },
       });
@@ -280,9 +300,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // Suppress native context menu on touch devices (prevents cut/copy/paste overlay on mobile)
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
-    const isTouchPrimary = window.matchMedia('(pointer: coarse)').matches;
-    if (!isTouchPrimary) return;
+    if (!container || !isTouchDevice) return;
 
     const handleContextMenu = (e: Event) => {
       e.preventDefault();
@@ -355,30 +373,23 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     return () => window.clearTimeout(timer);
   }, [blocks, locationHash, scrollToAnchor, stickyScrollViewport]);
 
-  // Cmd+C / Ctrl+C keyboard shortcut for copying selected text
+  // Use the native copy event so clipboard writes are synchronous (Safari
+  // rejects the async navigator.clipboard API outside the user-gesture window).
+  // web-highlighter clears the DOM selection on mouseup, so the browser has
+  // nothing to copy by the time Cmd+C fires — we inject the captured text here.
   useEffect(() => {
-    const handleKeyDown = async (e: KeyboardEvent) => {
-      // Check for Cmd+C (Mac) or Ctrl+C (Windows/Linux)
-      if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
-        // Don't intercept if typing in an input/textarea
-        const tag = (e.target as HTMLElement)?.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    const handleCopy = (e: ClipboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
-        // If we have an active selection with captured text, use that
-        if (toolbarState?.selectionText) {
-          e.preventDefault();
-          try {
-            await navigator.clipboard.writeText(toolbarState.selectionText);
-          } catch (err) {
-            console.error('Failed to copy:', err);
-          }
-        }
-        // Otherwise let the browser handle default copy behavior
+      if (toolbarState?.selectionText) {
+        e.preventDefault();
+        e.clipboardData?.setData('text/plain', toolbarState.selectionText);
       }
     };
 
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
+    document.addEventListener('copy', handleCopy);
+    return () => document.removeEventListener('copy', handleCopy);
   }, [toolbarState]);
 
   // Imperative handle — delegates to hook, extends removeHighlight for code blocks
@@ -479,6 +490,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     setViewerCommentPopover({
       anchorEl: hoveredCodeBlock.element,
       contextText: codeText.slice(0, 80),
+      selectedText: codeText,
       initialText: initialChar,
       isGlobal: false,
       codeBlock: hoveredCodeBlock,
@@ -526,12 +538,12 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
       <article
         ref={containerRef}
         data-print-region="article"
-        className={`w-full bg-card rounded-xl shadow-xl p-5 md:p-8 lg:p-10 xl:p-12 relative border border-border/50 ${inputMethod === 'pinpoint' ? 'cursor-crosshair' : ''}`}
+        className={`w-full bg-card rounded-xl py-5 md:py-8 lg:py-10 xl:py-12 relative ${gridEnabled ? 'px-5 md:px-8 lg:px-10 xl:px-12 shadow-xl border border-border/50' : ''} ${inputMethod === 'pinpoint' ? 'cursor-crosshair' : ''}`}
         style={{ WebkitTouchCallout: 'none' } as React.CSSProperties}
       >
         {/* Repo info + plan diff badge + demo badge + linked doc badge + archive badge - top left */}
-        {(repoInfo || hasPreviousVersion || showDemoBadge || linkedDocInfo || archiveInfo || sourceInfo) && (
-          <div data-print-hide className="absolute top-3 left-3 md:top-4 md:left-5">
+        {(repoInfo || hasPreviousVersion || showDemoBadge || linkedDocInfo || archiveInfo || sourceInfo || openInAppPath) && (
+          <div data-print-hide className={`absolute top-3 md:top-4 ${gridEnabled ? 'left-3 md:left-5' : 'left-0'}`}>
             <DocBadges
               layout="column"
               repoInfo={repoInfo}
@@ -543,6 +555,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               archiveInfo={archiveInfo}
               linkedDocInfo={linkedDocInfo}
               sourceInfo={sourceInfo}
+              openInAppPath={openInAppPath}
             />
           </div>
         )}
@@ -551,7 +564,23 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         {stickyActions && <div ref={stickySentinelRef} className="h-0 w-0 float-right" aria-hidden="true" />}
 
         {/* Header buttons - top right */}
-        <div data-print-hide data-sticky-actions className={`${stickyActions ? 'sticky top-3' : ''} z-30 float-right flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} -mr-3 mt-6 md:-mr-5 md:-mt-5 lg:-mr-7 lg:-mt-7 xl:-mr-9 xl:-mt-9`}>
+        <div data-print-hide data-sticky-actions className={`${stickyActions ? 'sticky top-3' : ''} z-30 float-right flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} ${gridEnabled ? '-mr-3 md:-mr-5 lg:-mr-7 xl:-mr-9' : '-mr-1 md:-mr-2'} mt-6 md:-mt-5 lg:-mt-7 xl:-mt-9`}>
+          {messagePickerInfo && (
+            <button
+              onClick={messagePickerInfo.onOpen}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
+              title="Pick a different message to annotate"
+            >
+              <MessagesIcon />
+              {actionsLabelMode === 'full' && (
+                <span>Message {messagePickerInfo.current} of {messagePickerInfo.total}</span>
+              )}
+              {actionsLabelMode === 'short' && (
+                <span>{messagePickerInfo.current}/{messagePickerInfo.total}</span>
+              )}
+            </button>
+          )}
+
           {/* Attachments button */}
           {onAddGlobalAttachment && onRemoveGlobalAttachment && (
             <AttachmentsButton
@@ -714,6 +743,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               onRequestComment={handleRequestComment}
               onQuickLabel={handleQuickLabel}
               copyText={toolbarState.selectionText}
+              hideCopyButton={!isTouchDevice}
               closeOnScrollOut
             />
           </ToolbarErrorBoundary>
@@ -808,15 +838,22 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
 
         {/* Comment popover — hook handles text selection, Viewer handles global + code block */}
         {hookCommentPopover && (
-          <CommentPopover
-            anchorEl={hookCommentPopover.anchorEl}
-            contextText={hookCommentPopover.contextText}
-            isGlobal={false}
-            initialText={hookCommentPopover.initialText}
-            onSubmit={hookCommentSubmit}
-            onClose={hookCommentClose}
-          />
-        )}
+            <CommentPopover
+              anchorEl={hookCommentPopover.anchorEl}
+              contextText={hookCommentPopover.contextText}
+              isGlobal={false}
+              initialText={hookCommentPopover.initialText}
+              onSubmit={hookCommentSubmit}
+              onClose={hookCommentClose}
+              onAskAI={onAskAI}
+              askAIContext={{
+                kind: 'selection',
+                label: 'Selected text',
+                text: hookCommentPopover.selectedText ?? hookCommentPopover.contextText,
+                sourcePath: linkedDocInfo?.filepath ?? sourceInfo,
+              }}
+            />
+          )}
         {viewerCommentPopover && (
           <CommentPopover
             anchorEl={viewerCommentPopover.anchorEl}
@@ -825,6 +862,13 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             initialText={viewerCommentPopover.initialText}
             onSubmit={handleViewerCommentSubmit}
             onClose={handleViewerCommentClose}
+            onAskAI={onAskAI}
+            askAIContext={{
+              kind: viewerCommentPopover.isGlobal ? 'general' : 'selection',
+              label: viewerCommentPopover.isGlobal ? 'Document' : 'Code block',
+              text: viewerCommentPopover.selectedText,
+              sourcePath: linkedDocInfo?.filepath ?? sourceInfo,
+            }}
           />
         )}
 
@@ -899,30 +943,5 @@ const ImageLightbox: React.FC<{ src: string; alt: string; onClose: () => void }>
 
 
 
-
-
-/** Groups consecutive list-item blocks so they can share a pinpoint hover wrapper. */
-type RenderGroup =
-  | { type: 'single'; block: Block }
-  | { type: 'list-group'; blocks: Block[]; key: string };
-
-function groupBlocks(blocks: Block[]): RenderGroup[] {
-  const groups: RenderGroup[] = [];
-  let i = 0;
-  while (i < blocks.length) {
-    if (blocks[i].type === 'list-item') {
-      const listBlocks: Block[] = [];
-      while (i < blocks.length && blocks[i].type === 'list-item') {
-        listBlocks.push(blocks[i]);
-        i++;
-      }
-      groups.push({ type: 'list-group', blocks: listBlocks, key: `list-${listBlocks[0].id}` });
-    } else {
-      groups.push({ type: 'single', block: blocks[i] });
-      i++;
-    }
-  }
-  return groups;
-}
 
 
