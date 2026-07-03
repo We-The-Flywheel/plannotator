@@ -1,5 +1,12 @@
 # Decisions
 
+## 2026-07-03 — Council runs stay in-process (exit-handler kill), not detached
+**Status:** accepted
+**Context:** A terminal interrupt on the pending `ExitPlanMode` prompt kills the hook server and any in-flight council.py run (2026-07-03 incident, ea session). Choice: accept run-dies-with-server and clean up properly, or make runs survive server death.
+**Decision:** Keep council.py an in-process child; the run manager kills it from a `process.on("exit")` handler (fatal signals already route through `process.exit` in the hook entry), and the UI states the ownership honestly (warning at run start, dead-server error copy on failed reconnects).
+**Alternatives:** Detached process group + events persisted to disk + re-attach from a later server. Rejected for now: macOS has no `setsid(1)`, re-attach adds cross-session state and staleness questions, and the reconnect layer already covers the common failure (network/browser drops) — revisit if interrupts keep eating runs.
+**Consequences:** An interrupted plan prompt still loses the run (by design, now stated in the UI). No orphaned council.py can 409-block future reviews after approve/deny exits.
+
 ## 2026-07-03 — Multi-LLM review reconnect via server-owned job model
 **Status:** accepted
 **Context:** Dropped SSE connections killed in-flight council.py reviews in the UI even though the process finished server-side (Chrome fetch-reader "network error", 409 dead-end on retry).

@@ -87,6 +87,7 @@ plannotator/
 
 ## Recent Session Work (2026-07-03)
 
+- `742a60b6` fix(auto-review): kill council.py on server exit + honest dead-server errors — run manager kills the in-flight council child from a `process.on("exit")` handler (no orphan can 409-block future reviews); client distinguishes dead-server from network-blip on failed reconnects and warns at run start that interrupting the plan prompt kills the review. Root cause of the 05:27 incident: terminal Esc on the pending ExitPlanMode killed the hook server mid-run
 - `87e41226` feat(auto-review): reconnectable server-owned multi-LLM review runs — council.py runs become buffered jobs (`multi-llm-run.ts`); `/start` attaches to in-flight runs, `/stream?since=N` resumes after network drops, client retries with backoff. Fixes the unrecoverable "network error" mid-deliberation
 - `f854e56b` chore: merge upstream v0.21.4 into custom fork — 589 files, 144 commits. **Regraft strategy** (upstream file wholesale + fork features re-applied) replaced May's favor-HEAD approach, recovering silently-dropped 0.19.x content. Pulled UI 2.0 refresh, markdown edit mode, math rendering, PR Overview panel, semantic diff, multi-repo workspace reviews, custom reviews as Agent Skills, codex app-server, Amp/Kiro integrations
 - `3ce64ecc` chore(ui): drop eager notification-permission request on pill mount
