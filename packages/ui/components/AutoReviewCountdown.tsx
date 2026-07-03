@@ -277,6 +277,11 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
       if (alreadyRunning) {
         actions.appendLog({ ts: Date.now(), level: 'info', text: 'Attached to review already in progress' });
       }
+      actions.appendLog({
+        ts: Date.now(),
+        level: 'info',
+        text: 'Run is owned by this plan session — interrupting the plan prompt in the terminal (Esc) kills the review.',
+      });
 
       // Stream events with reconnect: on a mid-stream network failure the
       // run keeps going server-side, so re-attach from the last seen event
@@ -285,6 +290,11 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
       let eventIndex = 0;
       let gotResult = false;
       let attempt = 0;
+      // Tracks whether any reconnect failure was an HTTP-level error (server
+      // alive but unhappy) vs. every attempt dying at the fetch layer
+      // (TypeError) — the latter on our own localhost origin means the server
+      // process is gone, not that the network blipped.
+      let sawHttpFailure = false;
 
       while (!gotResult) {
         try {
@@ -332,11 +342,16 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
           }
         } catch (err: any) {
           if (err?.name === 'AbortError' || err instanceof DeliberationFailed) throw err;
+          if (err?.name !== 'TypeError') sawHttpFailure = true;
           // Network-level failure — retry with backoff, resuming from eventIndex.
           if (attempt >= RETRY_DELAYS_MS.length) {
             throw new Error(
-              `Connection to review stream lost after ${RETRY_DELAYS_MS.length} reconnect attempts — ` +
-              'the review may still be running server-side. Try Retry once the network recovers.',
+              sawHttpFailure
+                ? `Connection to review stream lost after ${RETRY_DELAYS_MS.length} reconnect attempts — ` +
+                  'the review may still be running server-side. Try Retry once the network recovers.'
+                : `Review server unreachable after ${RETRY_DELAYS_MS.length} reconnect attempts. ` +
+                  'If your network is fine, the plan session was closed or interrupted in the terminal ' +
+                  '(interrupting the plan prompt kills the review server) — the run cannot be recovered from here.',
             );
           }
           const delay = RETRY_DELAYS_MS[attempt++];
@@ -364,7 +379,7 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
       // Surface actionable detail for network errors
       const detail =
         err?.name === 'TypeError' && msg === 'Failed to fetch'
-          ? 'Failed to fetch — server may have restarted. Try refreshing the page.'
+          ? 'Failed to fetch — the review server is unreachable (plan session closed/interrupted, or server restarted). Try refreshing the page.'
           : msg;
       console.error('[plannotator] multi-LLM review error:', err);
       actions.setError(detail);

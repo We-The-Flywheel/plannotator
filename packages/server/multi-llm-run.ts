@@ -45,6 +45,18 @@ export interface CouncilRunManager {
 export function createCouncilRunManager(): CouncilRunManager {
   let run: CouncilRun | null = null;
   let waiters: (() => void)[] = [];
+  let activeProc: ReturnType<typeof Bun.spawn> | null = null;
+
+  // The server leaves via process.exit() on approve/deny, and fatal signals
+  // are routed through it too (see apps/hook/server/index.ts). Without this,
+  // an in-flight council.py would outlive the server as an orphan — silently
+  // burning API spend, and its pgrep hit would 409-block every future review
+  // as "already running in shell".
+  process.on("exit", () => {
+    try {
+      activeProc?.kill();
+    } catch {}
+  });
 
   const notify = () => {
     const pending = waiters;
@@ -97,6 +109,7 @@ export function createCouncilRunManager(): CouncilRunManager {
         stderr: "pipe",
         env: { ...process.env },
       });
+      activeProc = proc;
       const stdoutPromise = new Response(proc.stdout).text();
 
       // Pump council.py's stderr (structured progress events / log lines)
@@ -153,6 +166,7 @@ export function createCouncilRunManager(): CouncilRunManager {
           });
           newRun.status = "error";
         }
+        if (activeProc === proc) activeProc = null;
         notify();
       })();
 
