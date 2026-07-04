@@ -98,7 +98,8 @@ import { parsePRUrl, checkPRAuth, fetchPR, getCliName, getCliInstallUrl, getMRLa
 import { writeRemoteShareLink } from "@plannotator/server/share-url";
 import { resolveMarkdownFile, resolveUserPath, hasMarkdownFiles } from "@plannotator/shared/resolve-file";
 import { FILE_BROWSER_EXCLUDED } from "@plannotator/shared/reference-common";
-import { statSync, rmSync, realpathSync, existsSync } from "fs";
+import { statSync, rmSync, realpathSync, existsSync, appendFileSync, mkdirSync } from "fs";
+import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
 import { parseRemoteUrl } from "@plannotator/shared/repo";
 import {
   getReviewApprovedPrompt,
@@ -300,6 +301,47 @@ process.on("exit", () => unregisterSession());
 // force-quit escape hatch if cleanup ever hangs.
 process.once("SIGINT", () => process.exit(130));
 process.once("SIGTERM", () => process.exit(143));
+
+/**
+ * Append a one-line JSON record of the decision the plan hook is about to emit
+ * to `<dataDir>/debug/hook-decisions.log`, then return so the caller can
+ * `console.log` the actual payload. Best-effort — never throws, never blocks
+ * the decision.
+ *
+ * This exists because the emit → stdout → wrapper → Claude Code handoff is
+ * otherwise unobservable after the fact. When an approve (especially after a
+ * multi-minute multi-LLM auto-review) appears not to reach the agent, this log
+ * is the ground truth: if the `allow` line is here, plannotator did its job and
+ * the loss is downstream (harness/wrapper); if it's absent, the hook died
+ * before emitting and we've finally caught it.
+ */
+function logHookDecision(entry: {
+  approved: boolean;
+  emitted: string;
+  origin: string;
+  multiLlm?: boolean;
+  elapsedMs?: number;
+  hadFeedback?: boolean;
+}): void {
+  try {
+    const dir = path.join(getPlannotatorDataDir(), "debug");
+    mkdirSync(dir, { recursive: true });
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      kind: "plan-decision",
+      approved: entry.approved,
+      origin: entry.origin,
+      multiLlm: entry.multiLlm ?? false,
+      elapsedMs: entry.elapsedMs,
+      hadFeedback: entry.hadFeedback ?? false,
+      pid: process.pid,
+      emitted: entry.emitted,
+    });
+    appendFileSync(path.join(dir, "hook-decisions.log"), line + "\n");
+  } catch {
+    // Observability must never affect the decision path.
+  }
+}
 
 // Check if URL sharing is enabled (default: true)
 const sharingEnabled = resolveSharingEnabled(loadConfig());
@@ -1948,7 +1990,10 @@ if (args[0] === "sessions") {
   });
 
   // Wait for user decision (blocks until approve/deny)
+  const decisionWaitStart = Date.now();
   const result = await server.waitForDecision();
+  const decisionElapsedMs = Date.now() - decisionWaitStart;
+  const multiLlmRan = server.didMultiLlmRun?.() ?? false;
 
   // Give browser time to receive response and update UI
   await Bun.sleep(1500);
@@ -1956,21 +2001,35 @@ if (args[0] === "sessions") {
   // Cleanup
   server.stop();
 
+  // Build the exact payload, record it to the decision log, then emit it — so a
+  // late approve that appears not to reach the agent is diagnosable after the
+  // fact (see logHookDecision).
+  const emitDecision = (payload: unknown) => {
+    const emitted = JSON.stringify(payload);
+    logHookDecision({
+      approved: result.approved,
+      emitted,
+      origin: isGemini ? "gemini-cli" : detectedOrigin,
+      multiLlm: multiLlmRan,
+      elapsedMs: decisionElapsedMs,
+      hadFeedback: !!result.feedback,
+    });
+    console.log(emitted);
+  };
+
   // Output decision in the appropriate format for the harness
   if (isGemini) {
     if (result.approved) {
-      console.log(result.feedback ? JSON.stringify({ systemMessage: result.feedback }) : "{}");
+      emitDecision(result.feedback ? { systemMessage: result.feedback } : {});
     } else {
-      console.log(
-        JSON.stringify({
-          decision: "deny",
-          reason: getPlanDeniedPrompt("gemini-cli", undefined, {
-            toolName: getPlanToolName("gemini-cli"),
-            planFileRule: buildPlanFileRule(getPlanToolName("gemini-cli"), planFilename),
-            feedback: result.feedback || "Plan changes requested",
-          }),
-        })
-      );
+      emitDecision({
+        decision: "deny",
+        reason: getPlanDeniedPrompt("gemini-cli", undefined, {
+          toolName: getPlanToolName("gemini-cli"),
+          planFileRule: buildPlanFileRule(getPlanToolName("gemini-cli"), planFilename),
+          feedback: result.feedback || "Plan changes requested",
+        }),
+      });
     }
   } else {
     // Claude Code: PermissionRequest hook decision
@@ -1984,35 +2043,31 @@ if (args[0] === "sessions") {
         });
       }
 
-      console.log(
-        JSON.stringify({
-          hookSpecificOutput: {
-            hookEventName: "PermissionRequest",
-            decision: {
-              behavior: "allow",
-              permissionDecisionReason:
-                "Plan approved via Plannotator. Begin implementation immediately — do not ask for further confirmation.",
-              ...(updatedPermissions.length > 0 && { updatedPermissions }),
-            },
+      emitDecision({
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: {
+            behavior: "allow",
+            permissionDecisionReason:
+              "Plan approved via Plannotator. Begin implementation immediately — do not ask for further confirmation.",
+            ...(updatedPermissions.length > 0 && { updatedPermissions }),
           },
-        })
-      );
+        },
+      });
     } else {
-      console.log(
-        JSON.stringify({
-          hookSpecificOutput: {
-            hookEventName: "PermissionRequest",
-            decision: {
-              behavior: "deny",
-              message: getPlanDeniedPrompt(detectedOrigin, undefined, {
-                toolName: getPlanToolName(detectedOrigin),
-                planFileRule: "",
-                feedback: result.feedback || "Plan changes requested",
-              }),
-            },
+      emitDecision({
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: {
+            behavior: "deny",
+            message: getPlanDeniedPrompt(detectedOrigin, undefined, {
+              toolName: getPlanToolName(detectedOrigin),
+              planFileRule: "",
+              feedback: result.feedback || "Plan changes requested",
+            }),
           },
-        })
-      );
+        },
+      });
     }
   }
 

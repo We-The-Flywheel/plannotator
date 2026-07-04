@@ -88,6 +88,13 @@ describe("multi-llm run manager", () => {
     expect(Date.now() - t0).toBeLessThan(1000);
   });
 
+  // NOTE: the post-run cleanup of council.py's ~/.plannotator/council-done.json
+  // marker is intentionally NOT unit-tested here. The manager resolves the marker
+  // via os.homedir(), which Bun fixes at process start and does not re-read from a
+  // mutated process.env.HOME — so an in-process test cannot redirect it to a temp
+  // dir and would delete the real user's marker. It is covered end-to-end by the
+  // binary smoke test (isolated HOME set at spawn), which is authoritative here.
+
   test("a new run replaces the previous one", async () => {
     const manager = createCouncilRunManager();
     const first = manager.start("q1", fakeCouncil(HAPPY_COUNCIL));

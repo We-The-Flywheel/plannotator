@@ -166,6 +166,17 @@ export function createCouncilRunManager(): CouncilRunManager {
           });
           newRun.status = "error";
         }
+        // council.py unconditionally writes ~/.plannotator/council-done.json on
+        // exit as a "a shell review just finished — skip deliberation" signal for
+        // the next plan's UI (reviewAlreadyDone). A server-owned run is NOT a
+        // shell review — the UI already ran it here — so leaving that marker makes
+        // the *next* plan within 5 minutes silently auto-approve with no review.
+        // Delete the marker this child just wrote so only genuine shell runs trip
+        // the skip. Matches council.py's hardcoded homedir path (not the data dir).
+        try {
+          const fs = await import("fs/promises");
+          await fs.unlink(resolve(homedir(), ".plannotator", "council-done.json")).catch(() => {});
+        } catch {}
         if (activeProc === proc) activeProc = null;
         notify();
       })();

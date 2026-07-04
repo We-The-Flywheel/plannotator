@@ -1,5 +1,18 @@
 # Decisions
 
+## 2026-07-05 — Server-owned council runs delete their own council-done.json marker
+**Status:** accepted
+**Context:** council.py unconditionally writes `~/.plannotator/council-done.json` on exit as a "a shell review just finished — skip deliberation" signal (`reviewAlreadyDone` in `/api/plan`, 5-min TTL). The server-owned in-UI run spawns the same council.py, so it leaves the same marker — making the NEXT plan within 5 min silently auto-approve with no review.
+**Decision:** The run manager (`createCouncilRunManager`, packages/server/multi-llm-run.ts) unlinks the marker when a server-owned run reaches terminal status. Only genuine shell runs now trip the skip.
+**Alternatives:** (a) Make `reviewAlreadyDone` fire only for *foreign* council processes — rejected: the marker has no owner-pid, can't distinguish reliably, and the marker outlives the process. (b) Patch council.py to not write the marker under a server env flag — rejected: council.py is an external skill file (`~/opt/agentic-coding/...`), out of this repo's control. Owning cleanup on the plannotator side is the only self-contained fix.
+**Consequences:** Marker path stays hardcoded `os.homedir()/.plannotator` (matches council.py), not `PLANNOTATOR_DATA_DIR`. Cleanup isn't unit-testable (Bun fixes `homedir()` at process start) — covered by binary smoke test only.
+
+## 2026-07-05 — hook-decisions.log is the diagnostic for "approve didn't reach the agent"
+**Status:** accepted
+**Context:** A report that multi-LLM auto-approve "doesn't come back to the agent" could not be reproduced — the deployed binary + wrapper emit a correct `allow` and exit 0 through the full flow. The emit → stdout → wrapper → Claude Code handoff left no record, so which side failed was unknowable after the fact.
+**Decision:** The plan hook appends every decision (approve/deny, exact emitted payload, multiLlm flag, elapsedMs, pid) to `~/.plannotator/debug/hook-decisions.log` before emitting. Ground truth for the next occurrence: `allow` line present ⇒ plannotator did its job (loss is harness/wrapper-side); absent ⇒ the hook died before emitting.
+**Alternatives:** Add heartbeat/streaming to the hook (PermissionRequest hooks can't stream a partial decision); strip `permissionDecisionReason`/`updatedPermissions` to the documented schema (rejected — those fields work in real usage per prior sessions, and stripping loses the bypass-on-approve + prescriptive-reason features).
+
 ## 2026-07-03 — Council runs stay in-process (exit-handler kill), not detached
 **Status:** accepted
 **Context:** A terminal interrupt on the pending `ExitPlanMode` prompt kills the hook server and any in-flight council.py run (2026-07-03 incident, ea session). Choice: accept run-dies-with-server and clean up properly, or make runs survive server death.

@@ -140,6 +140,8 @@ export interface ServerResult {
   }>;
   /** Wait for user to close (archive mode only) */
   waitForDone?: () => Promise<void>;
+  /** True once a server-owned multi-LLM review run has started this session. */
+  didMultiLlmRun?: () => boolean;
   /** Stop the server */
   stop: () => void;
 }
@@ -1152,6 +1154,10 @@ INSTRUCTIONS:
     url: serverUrl,
     isRemote,
     waitForDecision: () => decisionPromise,
+    // True once a server-owned multi-LLM review run has been started this
+    // session (running or finished). Used by the hook's decision log to
+    // attribute an approve to the auto-review flow vs. a plain manual approve.
+    didMultiLlmRun: () => councilRuns.run !== null,
     ...(donePromise && { waitForDone: () => donePromise }),
     stop: () => {
       // Tear down the execution watcher first so its fs.watch handle and
