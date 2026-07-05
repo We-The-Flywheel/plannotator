@@ -9,6 +9,7 @@
     ".": "./index.ts",
     "./review": "./review.ts",
     "./annotate": "./annotate.ts",
+    "./mirror": "./mirror.ts",
     "./remote": "./remote.ts",
     "./browser": "./browser.ts",
     "./goal-setup": "./goal-setup.ts",

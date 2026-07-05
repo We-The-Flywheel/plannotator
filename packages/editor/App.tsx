@@ -391,6 +391,11 @@ const AppInner: React.FC = () => {
   const [isExiting, setIsExiting] = useState(false);
   const [submitted, setSubmitted] = useState<'approved' | 'denied' | 'exited' | null>(null);
   const [reviewAlreadyDone, setReviewAlreadyDone] = useState(false);
+  // True when this tab is served by the detached post-approve mirror (a fresh
+  // load / refresh against it). The plan was already approved; render straight
+  // into the watching view and never offer review-time actions (multi-LLM
+  // review, approve/deny) — the mirror can't serve them.
+  const [watchingMode, setWatchingMode] = useState(false);
   const [activeHooks, setActiveHooks] = useState<string[]>([]);
   const [automationsList, setAutomationsList] = useState<Automation[]>([]);
   const [wasAutoApproved, setWasAutoApproved] = useState(false);
@@ -2153,7 +2158,7 @@ const AppInner: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; reviewAlreadyDone?: boolean }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; reviewAlreadyDone?: boolean; watching?: boolean }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Session-level force-markdown preference (--markdown); threaded into folder/linked
@@ -2259,6 +2264,15 @@ const AppInner: React.FC = () => {
         }
         if (data.reviewAlreadyDone) {
           setReviewAlreadyDone(true);
+        }
+        // Served by the detached post-approve mirror: the plan is already
+        // approved and implementation is running. Mount directly into the
+        // approved/watching view (Live activity) in the same state batch that
+        // sets isApiMode, so AutoReviewCountdown mounts already-disabled and
+        // never auto-starts a review the mirror can't serve.
+        if (data.watching) {
+          setWatchingMode(true);
+          setSubmitted('approved');
         }
       })
       .catch(() => {
@@ -3866,7 +3880,7 @@ const AppInner: React.FC = () => {
           submitted={submitted}
           wasAutoApproved={wasAutoApproved}
           autoReviewSlot={
-            isApiMode && !annotateMode && !archive.archiveMode && !goalSetupMode ? (
+            isApiMode && !annotateMode && !archive.archiveMode && !goalSetupMode && !watchingMode ? (
               <AutoReviewCountdown
                 plan={markdown}
                 onPlanRevised={(newPlan, newVersionInfo) => {
@@ -4175,7 +4189,7 @@ const AppInner: React.FC = () => {
 
               {/* Live execution mirror — post-approve activity feed (commits + file edits).
                   Rendered for BOTH manual approve and deliberation auto-approve. */}
-              {submitted === 'approved' && !annotateMode && <ExecutionMirror />}
+              {(submitted === 'approved' || watchingMode) && !annotateMode && <ExecutionMirror />}
 
               {/* Auto-approved banner — shown when deliberation auto-approved, keeps plan visible */}
               {wasAutoApproved && submitted === 'approved' && (

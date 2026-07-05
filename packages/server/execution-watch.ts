@@ -63,6 +63,12 @@ export interface ExecutionWatch {
     url: URL,
     options?: { disableIdleTimeout?: () => void },
   ): Promise<Response | null>;
+  /**
+   * Number of currently-connected SSE subscribers. The detached mirror
+   * server reads this to decide when the watching tab has closed and it can
+   * idle-shut-down.
+   */
+  subscriberCount(): number;
   /** Tear down fs.watch + polling interval + active subscribers. */
   stop(): void;
 }
@@ -381,6 +387,10 @@ export function createExecutionWatch(
           Connection: "keep-alive",
         },
       });
+    },
+
+    subscriberCount(): number {
+      return subscribers.size;
     },
 
     stop(): void {

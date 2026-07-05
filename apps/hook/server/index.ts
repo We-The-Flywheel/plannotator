@@ -109,6 +109,7 @@ import {
   buildPlanFileRule,
 } from "@plannotator/shared/prompts";
 import { registerSession, unregisterSession, listSessions } from "@plannotator/server/sessions";
+import { spawnDetachedMirror, startMirrorServer, readMirrorHandoff } from "@plannotator/server/mirror";
 import { openBrowser } from "@plannotator/server/browser";
 import { inlineHtmlLocalAssets } from "@plannotator/server/html-assets";
 import { installAgentTerminalRuntime } from "@plannotator/server/agent-terminal-runtime";
@@ -1843,6 +1844,31 @@ if (args[0] === "sessions") {
 
   process.exit(0);
 
+} else if (args[0] === "mirror") {
+  // ============================================
+  // DETACHED EXECUTION-MIRROR MODE
+  // ============================================
+  //
+  // Spawned (detached, unref'd) by the plan-review approve flow so the
+  // post-approve "Live activity" feed survives this hook's exit. Rebinds the
+  // same port the hook server used; the already-open browser tab reconnects
+  // to it. See @plannotator/server/mirror.
+
+  const handoffIdx = args.indexOf("--handoff");
+  const handoffFile = handoffIdx >= 0 ? args[handoffIdx + 1] : null;
+  if (!handoffFile) process.exit(1);
+
+  try {
+    const handoff = readMirrorHandoff(handoffFile as string);
+    await startMirrorServer({ ...handoff, htmlContent: planHtmlContent });
+  } catch {
+    process.exit(1);
+  }
+
+  // startMirrorServer resolves once bound; keep the process alive until it
+  // idle-shuts-down via process.exit from within its own loop.
+  await new Promise<never>(() => {});
+
 } else {
   // ============================================
   // PLAN REVIEW MODE (default)
@@ -1994,6 +2020,21 @@ if (args[0] === "sessions") {
   const result = await server.waitForDecision();
   const decisionElapsedMs = Date.now() - decisionWaitStart;
   const multiLlmRan = server.didMultiLlmRun?.() ?? false;
+
+  // Hand the post-approve "Live activity" mirror off to a detached process
+  // that outlives this hook. The hook MUST exit for the agent to begin
+  // implementing, which kills this server — so a detached mirror rebinds the
+  // same port and the already-open tab reconnects to it. Approve-only: a deny
+  // re-plans, with no implementation to watch.
+  if (result.approved) {
+    spawnDetachedMirror({
+      port: server.port,
+      cwd: process.cwd(),
+      sinceMs: Date.now(),
+      plan: planContent,
+      origin: isGemini ? "gemini-cli" : detectedOrigin,
+    });
+  }
 
   // Give browser time to receive response and update UI
   await Bun.sleep(1500);
