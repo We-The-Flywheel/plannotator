@@ -72,3 +72,18 @@ export function getServerPort(): number {
 export function getServerHostname(): string {
   return isRemoteSession() ? "0.0.0.0" : LOOPBACK_HOST;
 }
+
+/**
+ * True if `err` is a "port already in use" bind failure. Bun's `Bun.serve`
+ * throws `{ code: "EADDRINUSE" }` with a message like "Failed to start
+ * server. Is port N in use?" — which does NOT contain the literal string
+ * "EADDRINUSE" — so matching the message alone silently misses it and the
+ * port-retry loops never fire. Check both the code and the human message.
+ */
+export function isAddressInUseError(err: unknown): boolean {
+  if (!err) return false;
+  const code = (err as { code?: string }).code;
+  if (code === "EADDRINUSE") return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /EADDRINUSE|address already in use|in use/i.test(msg);
+}

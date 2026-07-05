@@ -15,7 +15,7 @@ import {
   type GoalSetupQuestionAnswer,
   type GoalSetupResult,
 } from "@plannotator/shared/goal-setup";
-import { isRemoteSession, getServerHostname, getServerPort } from "./remote";
+import { isRemoteSession, getServerHostname, getServerPort, isAddressInUseError } from "./remote";
 import { getRepoInfo } from "./repo";
 import {
   handleFavicon,
@@ -211,8 +211,7 @@ export async function startGoalSetupServer(
 
       break;
     } catch (err: unknown) {
-      const isAddressInUse =
-        err instanceof Error && err.message.includes("EADDRINUSE");
+      const isAddressInUse = isAddressInUseError(err);
 
       if (isAddressInUse && attempt < MAX_RETRIES) {
         await Bun.sleep(RETRY_DELAY_MS);

@@ -105,8 +105,13 @@ export async function listenOnPort(
 			const addr = server.address() as { port: number };
 			return { port: addr.port, portSource: result.portSource };
 		} catch (err: unknown) {
+			// Node/Bun surface "port in use" as `{ code: "EADDRINUSE" }`; the
+			// message doesn't reliably contain the literal "EADDRINUSE" (Bun says
+			// "Is port N in use?"), so check the code too or the retry never fires.
+			const code = (err as { code?: string } | null)?.code;
+			const msg = err instanceof Error ? err.message : String(err);
 			const isAddressInUse =
-				err instanceof Error && err.message.includes("EADDRINUSE");
+				code === "EADDRINUSE" || /EADDRINUSE|address already in use|in use/i.test(msg);
 			if (isAddressInUse && attempt < MAX_RETRIES) {
 				await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
 				continue;

@@ -26,7 +26,7 @@ import { writeFileSync, readFileSync, mkdirSync, unlinkSync, openSync } from "no
 import { join, basename } from "node:path";
 import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
 import type { Origin } from "@plannotator/shared/agents";
-import { getServerHostname } from "./remote";
+import { getServerHostname, isAddressInUseError } from "./remote";
 import { createExecutionWatch } from "./execution-watch";
 import { createExternalAnnotationHandler } from "./external-annotations";
 import { contentHash } from "./draft";
@@ -272,14 +272,11 @@ export async function startMirrorServer(opts: StartMirrorOptions): Promise<void>
       dbg(`bound on attempt ${attempt}`);
       break;
     } catch (err) {
-      // Bun's port-in-use error is `{ code: "EADDRINUSE" }` with a message
-      // like "Failed to start server. Is port N in use?" — which does NOT
-      // contain the literal "EADDRINUSE". Match on both the code and the
-      // human message so the retry-until-the-parent-frees-the-port loop
-      // actually fires (the whole point of the handoff).
-      const code = (err as { code?: string } | null)?.code;
-      const msg = err instanceof Error ? err.message : String(err);
-      const inUse = code === "EADDRINUSE" || /EADDRINUSE|in use|address already/i.test(msg);
+      // Bun's port-in-use error message doesn't contain "EADDRINUSE" (it says
+      // "Is port N in use?"), so isAddressInUseError checks the code too —
+      // without which the retry-until-the-parent-frees-the-port loop (the
+      // whole point of the handoff) would never fire.
+      const inUse = isAddressInUseError(err);
       if (inUse && attempt < BIND_MAX_ATTEMPTS) {
         if (attempt === 1 || attempt % 10 === 0) dbg(`bind attempt ${attempt}: in-use, retrying`);
         await Bun.sleep(BIND_RETRY_MS);
