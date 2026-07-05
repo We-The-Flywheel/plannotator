@@ -2253,7 +2253,7 @@ const AppInner: React.FC = () => {
         if (data.origin) {
           setOrigin(data.origin);
           // For Claude Code, check if user needs to configure permission mode
-          if (data.origin === 'claude-code' && data.mode !== 'goal-setup' && needsPermissionModeSetup()) {
+          if (data.origin === 'claude-code' && data.mode !== 'goal-setup' && !data.watching && needsPermissionModeSetup()) {
             setShowPermissionModeSetup(true);
           }
           // Load saved permission mode preference
@@ -3907,6 +3907,14 @@ const AppInner: React.FC = () => {
                 hasAnnotations={allAnnotations.length > 0}
                 disabled={isSubmitting || submitted !== null}
                 reviewAlreadyDone={reviewAlreadyDone}
+                onWatchMode={() => {
+                  // Plan was approved out-of-band and this tab reconnected to
+                  // the post-approve mirror — flip to the watching view and
+                  // drop the now-moot permission-mode prompt.
+                  setWatchingMode(true);
+                  setSubmitted('approved');
+                  setShowPermissionModeSetup(false);
+                }}
               />
             ) : null
           }

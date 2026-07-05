@@ -248,8 +248,11 @@ export async function startMirrorServer(opts: StartMirrorOptions): Promise<void>
             return Response.json({ available: false, providers: [] });
           }
           if (url.pathname.startsWith("/api/")) {
+            // `watching: true` lets a tab still in review mode (plan approved
+            // out-of-band, then reconnected here) recognise the server is now
+            // the mirror and flip to the watching view instead of erroring.
             return Response.json(
-              { error: "Not available in watch mode" },
+              { error: "Not available in watch mode", watching: true },
               { status: 404 },
             );
           }

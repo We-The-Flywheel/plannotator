@@ -26,6 +26,10 @@ interface AutoReviewCountdownProps {
   approvalCountdownSeconds?: number;
   /** When true, a multi-LLM review already completed (e.g. via shell) — skip deliberation and jump to approval countdown. */
   reviewAlreadyDone?: boolean;
+  /** Called when a review action discovers the server is now the post-approve
+   *  mirror (plan approved out-of-band). The tab should flip to the watching
+   *  view instead of surfacing a "review failed" error. */
+  onWatchMode?: () => void;
 }
 
 // OpenRouter pricing (USD per 1M tokens). Keep in sync with server/apply-review.
@@ -115,6 +119,7 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
   countdownSeconds = 8,
   approvalCountdownSeconds = 10,
   reviewAlreadyDone = false,
+  onWatchMode,
 }) => {
   const { phase, secondsLeft, errorMsg, isDrawerOpen, actions } = useAutoReview();
   const [todayCost, setTodayCost] = useState<number>(() => getTodayCost());
@@ -263,6 +268,15 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
 
       if (!startRes.ok) {
         const err = await startRes.json().catch(() => ({ error: `HTTP ${startRes.status}` }));
+        if (err.watching) {
+          // The server is now the post-approve mirror — the plan was approved
+          // out-of-band while this tab was still reviewing. Flip to the
+          // watching view instead of reporting a failure.
+          actions.setPhase('idle');
+          actions.closeDrawer();
+          onWatchMode?.();
+          return;
+        }
         if (startRes.status === 409) {
           // council.py launched outside the server (e.g. via shell) — can't attach
           actions.appendLog({ ts: Date.now(), level: 'info', text: 'Skipped — review already running in shell' });
