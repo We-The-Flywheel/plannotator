@@ -85,6 +85,13 @@ plannotator/
 - `~/.local/bin/plannotator` — CLI mirror of the same binary
 - `~/.ipe/ipe.bin.pre-v0214` — rollback to pre-v0.21.4-merge build
 
+## Recent Session Work (2026-07-05, later)
+
+- **Detached post-approve execution mirror** (`88fc6703`) — the "Live activity" mirror couldn't work in-process: a PermissionRequest hook must emit its decision and `process.exit()` for the agent to implement, killing the server ~1.5s after approve (`ERR_CONNECTION_REFUSED` spam, stranded stale plan). On approve the hook now spawns a **detached** (`node:child_process` `detached`+`unref`) `plannotator mirror --handoff <file>` process that outlives it and **rebinds the same port** (retry-until-freed) — the open tab reconnects with zero client changes. New `packages/server/mirror.ts` (`startMirrorServer` + `spawnDetachedMirror`); `subscriberCount()` on `execution-watch.ts` for idle shutdown; `mirror` subcommand in `apps/hook/server/index.ts`. See DECISIONS.md 2026-07-05.
+- **Port-in-use detection hardening** (`d90cd892`) — Bun's `Bun.serve` port-collision error message lacks the literal `"EADDRINUSE"` (it says "Is port N in use?"), so every `err.message.includes("EADDRINUSE")` retry guard silently never fired (this is what killed the mirror handoff until fixed). New shared `isAddressInUseError(err)` in `packages/server/remote.ts` (checks code + message), wired into index/review/annotate/goal-setup/mirror; pi's node server fixed inline.
+- **Watch-mode graceful flip** (`dc967ddb`) — a review-mode tab whose plan is approved out-of-band fired its multi-LLM review at the mirror → "Review failed · Not available in watch mode". Mirror now tags rejections with `watching:true`; `AutoReviewCountdown` + `App.tsx` treat it as "approved elsewhere" and flip to the watching/Live-activity view instead of erroring. `/api/plan` `watching:true` also mounts a fresh load straight into the watching view (no auto-review).
+- **Diagnostic hatch:** `PLANNOTATOR_MIRROR_DEBUG=1` → `~/.plannotator/mirror/mirror-debug.log` (bind attempts, shutdown reason, signals).
+
 ## Recent Session Work (2026-07-05)
 
 - **multi-LLM "signal-back" investigation + observability** — report that auto-approve after deliberation "doesn't come back to the agent". Proved plannotator's emission is correct end-to-end (deployed `~/.ipe/ipe.bin` + wrapper → full flow → clean `allow`, exit 0). Added `~/.plannotator/debug/hook-decisions.log` (every plan decision + exact payload + multiLlm/elapsed) as the after-the-fact diagnostic (`logHookDecision`/`emitDecision` in `apps/hook/server/index.ts`, `server.didMultiLlmRun()` in `packages/server/index.ts`). Root cause is downstream (harness/transient); see DECISIONS.md 2026-07-05.
@@ -122,6 +129,7 @@ cp ~/.ipe/ipe.bin ~/.local/bin/plannotator
 ## Architecture Highlights
 
 - **Two server runtimes, one API surface.** `packages/server/` (Bun, used by Claude Code + OpenCode) and `apps/pi-extension/server/` (Node `http`, used by the Pi extension) mirror each other. Pi tends to drift behind — see auto-memory.
+- **The mirror outlives the hook.** The plan-review hook is synchronous (emit decision → exit), so anything that must run *during implementation* — the "Live activity" execution mirror — runs in a **detached** process (`packages/server/mirror.ts`) that rebinds the hook's port after it exits. The council, by contrast, runs *during review* while the hook is alive, so it stays in-process (DECISIONS.md 2026-07-03 vs 2026-07-05).
 - **Hook output is the contract.** Stdout from `apps/hook/server/index.ts` is the only payload Claude Code sees on a PermissionRequest. Approve emits `{behavior:"allow", permissionDecisionReason, updatedPermissions}`. Deny emits `{behavior:"deny", message}`. The IPE wrapper post-processes to inject `bypassPermissions` without dropping fields.
 - **Cookies, not localStorage.** Each hook invocation runs on a random port, so settings persist via cookies that work across origins.
 - **Auto-review pipeline is decoupled.** `b8a7ef5` separated `approval_countdown` from the apply-promise chain to avoid `handleApprove` reading stale markdown after the multi-LLM merge. State lives in `AutoReviewContext`.
