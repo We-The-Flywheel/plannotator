@@ -2084,13 +2084,22 @@ if (args[0] === "sessions") {
         });
       }
 
+      // Approve-with-updates: the user annotated the plan and still approved.
+      // Their feedback is the whole point of an annotated approve — fold it into
+      // the reason so the agent implements the updated plan, not the original.
+      // (The Gemini path already surfaces this via systemMessage; without this,
+      // Claude Code proceeds but silently drops the user's changes.)
+      const approveReason = result.feedback
+        ? "Plan approved via Plannotator with the following required updates. Incorporate them before/while implementing, then begin immediately — do not ask for further confirmation:\n\n" +
+          result.feedback
+        : "Plan approved via Plannotator. Begin implementation immediately — do not ask for further confirmation.";
+
       emitDecision({
         hookSpecificOutput: {
           hookEventName: "PermissionRequest",
           decision: {
             behavior: "allow",
-            permissionDecisionReason:
-              "Plan approved via Plannotator. Begin implementation immediately — do not ask for further confirmation.",
+            permissionDecisionReason: approveReason,
             ...(updatedPermissions.length > 0 && { updatedPermissions }),
           },
         },
