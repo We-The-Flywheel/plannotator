@@ -10,6 +10,7 @@
     "./review": "./review.ts",
     "./annotate": "./annotate.ts",
     "./mirror": "./mirror.ts",
+    "./plan-dialog": "./plan-dialog.ts",
     "./remote": "./remote.ts",
     "./browser": "./browser.ts",
     "./goal-setup": "./goal-setup.ts",

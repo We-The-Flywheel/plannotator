@@ -100,6 +100,7 @@ import { resolveMarkdownFile, resolveUserPath, hasMarkdownFiles } from "@plannot
 import { FILE_BROWSER_EXCLUDED } from "@plannotator/shared/reference-common";
 import { statSync, rmSync, realpathSync, existsSync, appendFileSync, mkdirSync } from "fs";
 import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
+import { resolvePlanDialogViaKeypress } from "@plannotator/server/plan-dialog";
 import { parseRemoteUrl } from "@plannotator/shared/repo";
 import {
   getReviewApprovedPrompt,
@@ -323,6 +324,7 @@ function logHookDecision(entry: {
   multiLlm?: boolean;
   elapsedMs?: number;
   hadFeedback?: boolean;
+  keypressInjected?: boolean;
 }): void {
   try {
     const dir = path.join(getPlannotatorDataDir(), "debug");
@@ -330,6 +332,7 @@ function logHookDecision(entry: {
     const line = JSON.stringify({
       ts: new Date().toISOString(),
       kind: "plan-decision",
+      keypressInjected: entry.keypressInjected ?? false,
       approved: entry.approved,
       origin: entry.origin,
       multiLlm: entry.multiLlm ?? false,
@@ -342,6 +345,62 @@ function logHookDecision(entry: {
   } catch {
     // Observability must never affect the decision path.
   }
+}
+
+/**
+ * Build the Claude Code PermissionRequest decision payload for a plan decision
+ * (allow with optional mode change / approve-with-updates feedback, or deny
+ * with the reviewer's feedback).
+ */
+function buildClaudeCodeDecisionPayload(
+  decision: { approved: boolean; feedback?: string; permissionMode?: string },
+  origin: Origin,
+): unknown {
+  if (decision.approved) {
+    const updatedPermissions = [];
+    if (decision.permissionMode) {
+      updatedPermissions.push({
+        type: "setMode",
+        mode: decision.permissionMode,
+        destination: "session",
+      });
+    }
+
+    // Approve-with-updates: the user annotated the plan and still approved.
+    // Their feedback is the whole point of an annotated approve — fold it into
+    // the reason so the agent implements the updated plan, not the original.
+    // (The Gemini path already surfaces this via systemMessage; without this,
+    // Claude Code proceeds but silently drops the user's changes.)
+    const approveReason = decision.feedback
+      ? "Plan approved via Plannotator with the following required updates. Incorporate them before/while implementing, then begin immediately — do not ask for further confirmation:\n\n" +
+        decision.feedback
+      : "Plan approved via Plannotator. Begin implementation immediately — do not ask for further confirmation.";
+
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: {
+          behavior: "allow",
+          permissionDecisionReason: approveReason,
+          ...(updatedPermissions.length > 0 && { updatedPermissions }),
+        },
+      },
+    };
+  }
+
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PermissionRequest",
+      decision: {
+        behavior: "deny",
+        message: getPlanDeniedPrompt(origin, undefined, {
+          toolName: getPlanToolName(origin),
+          planFileRule: "",
+          feedback: decision.feedback || "Plan changes requested",
+        }),
+      },
+    },
+  };
 }
 
 // Check if URL sharing is enabled (default: true)
@@ -2042,6 +2101,21 @@ if (args[0] === "sessions") {
   // Cleanup
   server.stop();
 
+  // Claude Code 2.1.199–2.1.207 ignore a PermissionRequest `allow` for
+  // ExitPlanMode — the interactive plan dialog stays up until a key is pressed,
+  // so the emitted allow below never actually unlocks the plan (verified
+  // empirically 2026-07-12; matches the "press 1/2 manually" workaround). Under
+  // tmux, resolve the dialog by injecting the approval keypress into the pane.
+  // Done here — after the mirror is spawned and the port freed — so the agent
+  // proceeds right as this hook exits and the mirror takes over. Gated to PLAIN
+  // approvals: an annotated approve's required updates can't be delivered via a
+  // keypress (it just proceeds with the shown plan), so those fall back to the
+  // manual channel, where the emitted allow still carries the feedback.
+  let keypressInjected = false;
+  if (!isGemini && detectedOrigin === "claude-code" && result.approved && !result.feedback) {
+    keypressInjected = await resolvePlanDialogViaKeypress(result.permissionMode);
+  }
+
   // Build the exact payload, record it to the decision log, then emit it — so a
   // late approve that appears not to reach the agent is diagnosable after the
   // fact (see logHookDecision).
@@ -2054,6 +2128,7 @@ if (args[0] === "sessions") {
       multiLlm: multiLlmRan,
       elapsedMs: decisionElapsedMs,
       hadFeedback: !!result.feedback,
+      keypressInjected,
     });
     console.log(emitted);
   };
@@ -2074,51 +2149,7 @@ if (args[0] === "sessions") {
     }
   } else {
     // Claude Code: PermissionRequest hook decision
-    if (result.approved) {
-      const updatedPermissions = [];
-      if (result.permissionMode) {
-        updatedPermissions.push({
-          type: "setMode",
-          mode: result.permissionMode,
-          destination: "session",
-        });
-      }
-
-      // Approve-with-updates: the user annotated the plan and still approved.
-      // Their feedback is the whole point of an annotated approve — fold it into
-      // the reason so the agent implements the updated plan, not the original.
-      // (The Gemini path already surfaces this via systemMessage; without this,
-      // Claude Code proceeds but silently drops the user's changes.)
-      const approveReason = result.feedback
-        ? "Plan approved via Plannotator with the following required updates. Incorporate them before/while implementing, then begin immediately — do not ask for further confirmation:\n\n" +
-          result.feedback
-        : "Plan approved via Plannotator. Begin implementation immediately — do not ask for further confirmation.";
-
-      emitDecision({
-        hookSpecificOutput: {
-          hookEventName: "PermissionRequest",
-          decision: {
-            behavior: "allow",
-            permissionDecisionReason: approveReason,
-            ...(updatedPermissions.length > 0 && { updatedPermissions }),
-          },
-        },
-      });
-    } else {
-      emitDecision({
-        hookSpecificOutput: {
-          hookEventName: "PermissionRequest",
-          decision: {
-            behavior: "deny",
-            message: getPlanDeniedPrompt(detectedOrigin, undefined, {
-              toolName: getPlanToolName(detectedOrigin),
-              planFileRule: "",
-              feedback: result.feedback || "Plan changes requested",
-            }),
-          },
-        },
-      });
-    }
+    emitDecision(buildClaudeCodeDecisionPayload(result, detectedOrigin));
   }
 
   process.exit(0);
