@@ -618,6 +618,17 @@ export async function startPlannotatorServer(
               if (existing?.status === "running") {
                 return Response.json({ runId: existing.id, alreadyRunning: true });
               }
+              const body = (await req.json()) as { plan?: string; question?: string };
+              const planText = body.plan || plan;
+              const question = body.question || `Review this implementation plan and provide feedback on completeness, risks, and improvements:\n${planText}`;
+              // A previous plan session may have died (Esc on the plan prompt,
+              // Claude Code restart) while its deliberation was in flight. The
+              // run is detached and still going, so re-adopt it instead of
+              // paying for the same review twice.
+              const adopted = councilRuns.attachLiveRun(question);
+              if (adopted) {
+                return Response.json({ runId: adopted.id, alreadyRunning: true });
+              }
               // Guard: a council.py we didn't start (e.g. via shell skill) can't be attached to
               if (await councilRuns.isForeignCouncilRunning()) {
                 return Response.json(
@@ -625,9 +636,6 @@ export async function startPlannotatorServer(
                   { status: 409 },
                 );
               }
-              const body = (await req.json()) as { plan?: string; question?: string };
-              const planText = body.plan || plan;
-              const question = body.question || `Review this implementation plan and provide feedback on completeness, risks, and improvements:\n${planText}`;
               const councilPath = await councilRuns.findCouncilPath();
               if (!councilPath) {
                 return Response.json({ error: "council.py not found." }, { status: 404 });
@@ -674,15 +682,19 @@ export async function startPlannotatorServer(
               if (existing?.status === "running") {
                 return streamCouncilRun(existing.id, 0);
               }
+              const body = (await req.json()) as { plan?: string; question?: string };
+              const planText = body.plan || plan;
+              const question = body.question || `Review this implementation plan and provide feedback on completeness, risks, and improvements:\n${planText}`;
+              const adopted = councilRuns.attachLiveRun(question);
+              if (adopted) {
+                return streamCouncilRun(adopted.id, 0);
+              }
               if (await councilRuns.isForeignCouncilRunning()) {
                 return Response.json(
                   { error: "Multi-LLM review already in progress (council.py running)" },
                   { status: 409 },
                 );
               }
-              const body = (await req.json()) as { plan?: string; question?: string };
-              const planText = body.plan || plan;
-              const question = body.question || `Review this implementation plan and provide feedback on completeness, risks, and improvements:\n${planText}`;
               const councilPath = await councilRuns.findCouncilPath();
               if (!councilPath) {
                 return Response.json({ error: "council.py not found." }, { status: 404 });

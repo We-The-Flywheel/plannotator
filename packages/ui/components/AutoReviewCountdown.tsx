@@ -294,7 +294,7 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
       actions.appendLog({
         ts: Date.now(),
         level: 'info',
-        text: 'Run is owned by this plan session — interrupting the plan prompt in the terminal (Esc) kills the review.',
+        text: 'Run is detached — it survives this plan session, so a reload or a fresh session re-attaches to it.',
       });
 
       // Stream events with reconnect: on a mid-stream network failure the
@@ -364,8 +364,9 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
                 ? `Connection to review stream lost after ${RETRY_DELAYS_MS.length} reconnect attempts — ` +
                   'the review may still be running server-side. Try Retry once the network recovers.'
                 : `Review server unreachable after ${RETRY_DELAYS_MS.length} reconnect attempts. ` +
-                  'If your network is fine, the plan session was closed or interrupted in the terminal ' +
-                  '(interrupting the plan prompt kills the review server) — the run cannot be recovered from here.',
+                  'The plan session was closed or interrupted in the terminal, so this page has nothing to ' +
+                  'talk to — but the deliberation itself is detached and keeps running. Re-submitting the ' +
+                  'plan re-attaches to it and replays the result; it will not be paid for twice.',
             );
           }
           const delay = RETRY_DELAYS_MS[attempt++];
