@@ -585,8 +585,11 @@ Running only `build:hook` after review-editor changes will copy stale HTML files
 
 ```bash
 bun run --cwd apps/review build && bun run build:hook && \
-  bun build apps/hook/server/index.ts --compile --outfile ~/.local/bin/plannotator
+  bun build apps/hook/server/index.ts --compile --outfile ~/.local/bin/plannotator && \
+  codesign --force -s - ~/.local/bin/plannotator
 ```
+
+**Always `codesign` after compiling or copying a binary.** On Apple Silicon an invalid signature makes it die with **exit 137 (SIGKILL) and zero output** — empty log, hook appears to do nothing, no error anywhere. This is not limited to `cp`: a fresh `bun build --compile` written *directly* to the destination also verified as `invalid signature (code or signature have been modified)`. Treat `codesign --force -s - <path>` as mandatory for every deployed binary (both `~/.local/bin/plannotator` and `~/.ipe/ipe.bin`), then confirm with `codesign -v <path>` **and** an actual `<path> --version` run before declaring a deploy done.
 
 Running only `build:opencode` will copy stale HTML files.
 
