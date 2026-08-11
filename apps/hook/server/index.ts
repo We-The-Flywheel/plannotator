@@ -294,15 +294,55 @@ if (isInteractiveNoArgInvocation(args, process.stdin.isTTY)) {
 }
 
 // Ensure session cleanup on exit
-process.on("exit", () => unregisterSession());
+process.on("exit", (code) => {
+  unregisterSession();
+  // Forensics: a plan hook that dies mid-review (server gone, no decision
+  // emitted, browser tab left with nothing to talk to) is invisible after the
+  // fact — nothing records when or how the process went away. Long-lived
+  // invocations only; a `--version` probe exits in milliseconds.
+  if (process.uptime() > 5) {
+    logHookLifecycle("exit", { code, uptimeMs: Math.round(process.uptime() * 1000) });
+  }
+});
 
 // Route fatal signals through process.exit() so "exit" handlers run — by
-// default a SIGINT/SIGTERM death skips them, leaking background-warmup
+// default a SIGINT/SIGTERM/SIGHUP death skips them, leaking background-warmup
 // children and stale `git worktree` registrations (the --local PR checkout
 // cleanup below is registered on "exit"). `once` keeps a second Ctrl-C as a
-// force-quit escape hatch if cleanup ever hangs.
-process.once("SIGINT", () => process.exit(130));
-process.once("SIGTERM", () => process.exit(143));
+// force-quit escape hatch if cleanup ever hangs. SIGHUP is included because a
+// terminal/session teardown is one of the ways a plan hook silently dies.
+const FATAL_SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 } as const;
+for (const [signal, exitCode] of Object.entries(FATAL_SIGNAL_EXIT_CODES)) {
+  process.once(signal as NodeJS.Signals, () => {
+    logHookLifecycle("signal", { signal, uptimeMs: Math.round(process.uptime() * 1000) });
+    process.exit(exitCode);
+  });
+}
+
+/**
+ * Append a one-line JSON record of a process-lifecycle event to
+ * `<dataDir>/debug/hook-lifecycle.log`. Companion to `logHookDecision`: that
+ * one proves what we emitted, this one proves how we died when we emitted
+ * nothing at all. Best-effort and synchronous — safe to call from an "exit"
+ * handler. Never throws.
+ */
+function logHookLifecycle(event: string, extra: Record<string, unknown> = {}): void {
+  try {
+    const dir = path.join(getPlannotatorDataDir(), "debug");
+    mkdirSync(dir, { recursive: true });
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      kind: "hook-lifecycle",
+      event,
+      pid: process.pid,
+      ppid: process.ppid,
+      ...extra,
+    });
+    appendFileSync(path.join(dir, "hook-lifecycle.log"), line + "\n");
+  } catch {
+    // Observability must never affect the hook's behaviour.
+  }
+}
 
 /**
  * Append a one-line JSON record of the decision the plan hook is about to emit

@@ -257,14 +257,57 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
       return false;
     };
 
-    try {
-      // Start (or attach to) the server-owned review run.
-      const startRes = await fetch('/api/multi-llm-review/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan: planRef.current }),
-        signal: controller.signal,
+    // Reconnect ladder, shared by the start POST and the event stream below.
+    const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+    // What a fetch-layer failure on our own localhost origin actually means:
+    // the server process is gone, not that the network blipped. Refreshing
+    // can't help — only the agent side can bring a server back.
+    const SERVER_GONE_MSG =
+      'Review server unreachable — the plan session was closed or interrupted in the terminal, so ' +
+      'this page has nothing to talk to. The deliberation itself is detached and keeps running; ' +
+      're-submitting the plan re-attaches to it and replays the result, so it is not paid for twice.';
+
+    /** Sleep, rejecting with an AbortError if the run is cancelled meanwhile. */
+    const sleepOrAbort = (ms: number) =>
+      new Promise<void>((resolveDelay, rejectDelay) => {
+        const t = setTimeout(resolveDelay, ms);
+        controller.signal.addEventListener('abort', () => {
+          clearTimeout(t);
+          const abortErr = new Error('Aborted');
+          abortErr.name = 'AbortError';
+          rejectDelay(abortErr);
+        }, { once: true });
       });
+
+    try {
+      // Start (or attach to) the server-owned review run. The server can be
+      // briefly unreachable here (mirror handoff on the fixed port, a restart),
+      // so one dead fetch must not burn the whole run — retry on the same
+      // ladder the stream uses before declaring the session gone.
+      let startRes: Response;
+      for (let startAttempt = 0; ; startAttempt++) {
+        try {
+          startRes = await fetch('/api/multi-llm-review/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ plan: planRef.current }),
+            signal: controller.signal,
+          });
+          break;
+        } catch (err: any) {
+          if (err?.name === 'AbortError') throw err;
+          if (startAttempt >= RETRY_DELAYS_MS.length) {
+            throw new DeliberationFailed(SERVER_GONE_MSG);
+          }
+          const delay = RETRY_DELAYS_MS[startAttempt];
+          actions.appendLog({
+            ts: Date.now(),
+            level: 'info',
+            text: `Review server not responding — retrying in ${Math.round(delay / 1000)}s (attempt ${startAttempt + 1}/${RETRY_DELAYS_MS.length})…`,
+          });
+          await sleepOrAbort(delay);
+        }
+      }
 
       if (!startRes.ok) {
         const err = await startRes.json().catch(() => ({ error: `HTTP ${startRes.status}` }));
@@ -300,7 +343,6 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
       // Stream events with reconnect: on a mid-stream network failure the
       // run keeps going server-side, so re-attach from the last seen event
       // index with exponential backoff instead of giving up.
-      const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
       let eventIndex = 0;
       let gotResult = false;
       let attempt = 0;
@@ -363,10 +405,7 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
               sawHttpFailure
                 ? `Connection to review stream lost after ${RETRY_DELAYS_MS.length} reconnect attempts — ` +
                   'the review may still be running server-side. Try Retry once the network recovers.'
-                : `Review server unreachable after ${RETRY_DELAYS_MS.length} reconnect attempts. ` +
-                  'The plan session was closed or interrupted in the terminal, so this page has nothing to ' +
-                  'talk to — but the deliberation itself is detached and keeps running. Re-submitting the ' +
-                  'plan re-attaches to it and replays the result; it will not be paid for twice.',
+                : SERVER_GONE_MSG,
             );
           }
           const delay = RETRY_DELAYS_MS[attempt++];
@@ -375,15 +414,7 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
             level: 'info',
             text: `Connection lost — reconnecting in ${Math.round(delay / 1000)}s (attempt ${attempt}/${RETRY_DELAYS_MS.length})…`,
           });
-          await new Promise<void>((resolveDelay, rejectDelay) => {
-            const t = setTimeout(resolveDelay, delay);
-            controller.signal.addEventListener('abort', () => {
-              clearTimeout(t);
-              const abortErr = new Error('Aborted');
-              abortErr.name = 'AbortError';
-              rejectDelay(abortErr);
-            }, { once: true });
-          });
+          await sleepOrAbort(delay);
         }
       }
 
@@ -393,9 +424,7 @@ export const AutoReviewCountdown: React.FC<AutoReviewCountdownProps> = ({
       const msg = err?.message || 'Unknown error';
       // Surface actionable detail for network errors
       const detail =
-        err?.name === 'TypeError' && msg === 'Failed to fetch'
-          ? 'Failed to fetch — the review server is unreachable (plan session closed/interrupted, or server restarted). Try refreshing the page.'
-          : msg;
+        err?.name === 'TypeError' && msg === 'Failed to fetch' ? SERVER_GONE_MSG : msg;
       console.error('[plannotator] multi-LLM review error:', err);
       actions.setError(detail);
       actions.appendLog({ ts: Date.now(), level: 'error', text: detail });
